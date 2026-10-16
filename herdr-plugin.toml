@@ -1,6 +1,6 @@
 id = "mpzarde.hg-worktree"
 name = "hg worktrees"
-version = "0.2.0"
+version = "0.3.0"
 min_herdr_version = "0.9.0"
 description = "Mercurial (hg share) worktree workspaces with git fallthrough, plus hg sidebar status"
 platforms = ["linux", "macos"]
@@ -25,6 +25,12 @@ id = "remove"
 title = "Remove worktree (hg share or git worktree)"
 contexts = ["workspace"]
 command = ["bin/hgwt", "action", "remove"]
+
+[[actions]]
+id = "prune"
+title = "Clean up hg shares and bookmarks whose work has landed"
+contexts = ["workspace"]
+command = ["bin/hgwt", "action", "prune"]
 
 [[actions]]
 id = "close-group"
@@ -71,11 +77,19 @@ height = 20
 command = ["bin/hgwt", "ui", "remove"]
 
 [[panes]]
+id = "prune"
+title = "Clean up shares"
+placement = "popup"
+width = "70%"
+height = 20
+command = ["bin/hgwt", "ui", "prune"]
+
+[[panes]]
 id = "close-group"
 title = "Close repo + shares"
 placement = "popup"
 width = "70%"
-height = 16
+height = 22
 command = ["bin/hgwt", "ui", "close-group"]
 
 [[panes]]

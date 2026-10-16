@@ -3,7 +3,7 @@
 Working notes for herdr-hg: status, next steps, design decisions and the herdr
 quirks found while building it. User-facing docs are in [README.md](README.md).
 
-## Status (2026-10-16, v0.2.0, herdr 0.9.5, hg 7.0.2)
+## Status (2026-10-16, v0.3.0, herdr 0.9.5, hg 7.0.2)
 
 - Linked locally: `herdr plugin link ~/projects/herdr-hg`
 - Setup applied on the author's machine (`hgwt setup`). The plugin's `config.env`
@@ -23,16 +23,24 @@ quirks found while building it. User-facing docs are in [README.md](README.md).
   caller's `$HERDR_WORKSPACE_ID`)
 - `pane.agent_status_changed` (simulated), `workspace.created/closed` event hooks
   (real herdr events)
-- removal guards: dirty share needs `--force`/`discard`; refuses the source repo
-  and non-shares; bookmarks survive removal
+- removal guards: dirty share or untracked files need `--force`/`discard`; refuses
+  the source repo and non-shares
+- cleanup (v0.3): remove deletes a created bookmark once landed (pushed/public, or
+  another bookmark moved onto it), keeps it when not landed, `--strip` deletes it
+  plus its commits with the backup in the source repo; strip refused when another
+  checkout is on those commits; `main`/pre-existing bookmarks never deleted;
+  `prune` (dry-run, orphan bookmarks, open shares skipped); `close-group --prune`;
+  remove/strip/prune popups via piped input; remote cache dir removed with the share
 - setup: idempotent rerun, byte-for-byte uninstall, existing `[keys]` table,
   customised sidebar rows left alone, key clash → rollback, foreign `hgwt` on
   PATH left alone
 
 ## Next steps
 
-1. **Manual test in a real hg repo**: `ctrl+b G` / `O` / `Y` / `C` popups, sizes,
-   prompts, focus behaviour. Check `↓` against a real (ssh/https) remote,
+1. **Manual test in a real hg repo**: `ctrl+b G` / `O` / `Y` / `C` popups and the
+   Clean up action, sizes, prompts, focus behaviour. In particular: removing the
+   share you're in from its own popup (the workspace close may kill the popup; all
+   hg work is done before that, but its messages may not be visible). Check `↓` against a real (ssh/https) remote,
    including the timeout and no-prompt behaviour.
 2. **Publish**: create a GitHub repo, push, add the `herdr-plugin` topic (shows up
    in herdr's marketplace, which re-indexes every 30 min). Then replace `<owner>`
@@ -48,7 +56,7 @@ quirks found while building it. User-facing docs are in [README.md](README.md).
    written yet.
 5. Possible extras, not started:
    - fuzzy picker when `fzf` is installed (currently a numbered list)
-   - `hgwt prune`: find shares whose bookmark is gone or merged
+   - a key binding for Clean up (left out so v0.3 didn't need a setup rerun)
    - topics (evolve) as an alternative to bookmarks
    - a test script in-repo (tests so far were ad-hoc shell; see "Testing" below)
    - Windows support (herdr supports it; this plugin is bash-only)
@@ -63,6 +71,12 @@ quirks found while building it. User-facing docs are in [README.md](README.md).
   worktree branches.
 - **No state file**: shares are discovered by scanning both layout locations
   and checking `.hg/sharedpath` → source. Changing layout never orphans anything.
+- **Clean up only what we made**: bookmarks created by `hgwt create` are listed in
+  `<source>/.hg/herdr-hg-bookmarks`, and only those get deleted. That file is the
+  one piece of state; it lives in the repo's metadata and is removed when empty.
+  "Landed" = `only(B, public() or <other bookmarks>) - obsolete()` is empty. Not
+  landed means keep (default) or strip (explicit), never delete the bookmark and
+  leave anonymous heads behind. If hg can't evaluate it, treat it as not landed.
 - **Labels decide grouping**: `↳ x` / `repo ▸ x` labels are "generated". Only
   generated labels are rewritten, so a manual rename opts a workspace out.
 - **Regroup only on create/open/source open/close/startup**, not on every focus,
@@ -97,6 +111,13 @@ quirks found while building it. User-facing docs are in [README.md](README.md).
   Fixed per share via `.hg/hgrc`.
 - hg `incoming` exits 1 for "nothing incoming" (not an error). Anything above 1
   means error/unknown bookmark, so fall back to `-b <branch>`.
+- hg 7: `strip` is core as `hg debugstrip` (the extension is deprecated). Run it
+  from the source repo, not the share being removed, or the backup bundle lands
+  in the share's `.hg` and gets deleted with it.
+- Shares made without `-B` don't see the source's bookmarks, so a revset naming a
+  bookmark errors there (and an empty result looks like "nothing"). Compare by
+  node in a repo that does see it.
+- Remote bookmarks: delete locally, then `hg push -B name` deletes it remotely.
 - macOS: bash 3.2 (`source <(…)` doesn't work, no `mapfile`/assoc arrays), no
   `timeout` (use `perl -e 'alarm …; exec …'`), BSD `sed -i ''`.
 

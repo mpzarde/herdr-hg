@@ -1,36 +1,32 @@
 # herdr-hg
 
-A [herdr](https://herdr.dev) plugin that gives Mercurial repos the same worktree
-workflow herdr has for git, using `hg share` checkouts and bookmarks.
+A [herdr](https://herdr.dev) plugin that adds Mercurial support to herdr. It
+does two things:
+
+- **Worktrees for hg**: the same worktree workflow herdr has for git, using
+  `hg share` checkouts and bookmarks.
+- **hg status in the sidebar**: bookmark, unpushed/incoming counts and changed
+  files for every hg repo open in herdr, whether or not you use shares.
 
 herdr itself still only knows about git. This plugin checks which kind of repo
 you're in, so the same keys work in both: hg repos get `hg share`, git repos are
 handed to herdr's built-in `herdr worktree`.
 
-## Features
+## Worktrees
 
 | | herdr + git | herdr-hg |
 |---|---|---|
 | New worktree | `git worktree add` + workspace | `hg share -B`, update to base, create/activate bookmark, open workspace. If the share already exists, it opens it. |
 | Open | worktree picker | Picks from the source repo and its shares (marks which are open) and switches to or opens one |
-| Remove | `git worktree remove`, keeps branch | Closes the workspace and deletes the checkout. Commits and bookmarks stay in the repo. Uncommitted changes need typing `discard` (or `--force`). |
-| Close repo + worktrees | `workspace close --group` | **close-group**: closes the repo's workspace and all its share workspaces |
+| Remove | `git worktree remove`, keeps branch | Deletes the checkout and closes its workspace, and cleans up the bookmark (see [Cleanup](#cleanup)). Uncommitted changes or untracked files need typing `discard` (or `--force`). |
+| Clean up | — | **prune**: removes closed shares and bookmarks whose work has landed |
+| Close repo + worktrees | `workspace close --group` | **close-group**: closes the repo's workspace and all its share workspaces, offering to prune first |
 | Sidebar grouping | shares indented under parent | Shares are labelled `↳ bookmark` and kept directly under the repo's workspace. When the repo's workspace isn't open they read `repo ▸ bookmark`. |
-| Sidebar status | `branch` · `git_status` (ahead/behind) | `$hg_bookmark` · `$hg_status` |
-| CLI | `herdr worktree list/create/open/remove` | `hgwt list/create/open/remove/close-group` |
+| CLI | `herdr worktree list/create/open/remove` | `hgwt list/create/open/remove/prune/close-group` |
 | Events | `worktree.*` | not emitted (herdr core only) |
 
-`$hg_status` combines:
-
-- `↑N`: draft (unpublished) changesets in your working copy's ancestry
-- `↓N`: incoming changesets for your bookmark (or branch) on the `default` remote.
-  This is checked in the background and cached (10 min by default), and re-checked
-  straight after `hg pull`/`push`.
-- `*N`: modified, added, removed or missing files
-
-The status refreshes after hg commands (via `~/.hgrc` hooks), when an agent in
-the workspace finishes a turn, when a workspace is focused or created, and on
-herdr startup.
+herdr forgets plugin sidebar data and the share grouping when it restarts, so
+the plugin restores both on startup.
 
 ### Where shares go
 
@@ -42,6 +38,57 @@ herdr startup.
 Shares are found in both locations whichever layout is set, so changing it later
 doesn't lose track of existing ones. Each share enables the `share` extension in
 its own `.hg/hgrc` so shared bookmarks resolve; your global hgrc doesn't need it.
+
+## Cleanup
+
+The goal is that finishing a piece of work leaves nothing behind: no checkout,
+no stale bookmark, no anonymous heads.
+
+A bookmark's work has **landed** when every commit it holds is public (pushed),
+also in another bookmark (e.g. `main` was moved or merged onto it), or obsolete
+(rebased/landed elsewhere with evolve).
+
+On **remove**, for a bookmark the plugin created:
+
+| State | What happens |
+|---|---|
+| landed | the bookmark is deleted |
+| not landed (default) | the bookmark is kept, so the work is still there to reopen; `prune` deletes it once it lands |
+| not landed, `--strip` (or type `strip` in the popup) | the bookmark and the commits only it holds are deleted. hg keeps a backup bundle in the source repo's `.hg/strip-backup`. Refused if another checkout is on those commits |
+
+Bookmarks the plugin didn't create (`main`, or one you already had and opened a
+share for) are never deleted. Created bookmarks are listed in the source repo's
+`.hg/herdr-hg-bookmarks`; the file goes away when the list is empty. Shares
+created before v0.3 aren't listed, so their bookmarks are kept.
+
+**prune** removes shares that are closed in herdr, have no uncommitted or
+untracked files, and whose work has landed. It also deletes created bookmarks
+that no checkout uses and that have landed, and lists any it keeps.
+**close-group** shows the same list (open shares included, since they're about
+to close) and asks before pruning.
+
+Deleting a local bookmark doesn't delete it on the remote. If you pushed it
+with `-B`, run `hg push -B <bookmark>` after it's deleted locally, which deletes it on the remote too.
+
+## Sidebar status
+
+herdr shows `branch` and `git_status` for git repos and nothing for hg. This
+plugin adds two sidebar tokens for any workspace whose directory is in an hg
+repo (a share or not):
+
+- `$hg_bookmark`: the active bookmark, or the branch if no bookmark is active
+- `$hg_status`, which combines:
+  - `↑N`: draft (unpublished) changesets in your working copy's ancestry
+  - `↓N`: incoming changesets for your bookmark (or branch) on the `default`
+    remote. This is checked in the background and cached (10 min by default),
+    and re-checked straight after `hg pull`/`push`.
+  - `*N`: modified, added, removed or missing files
+
+Setup adds both tokens to the Space sidebar rows. The status refreshes after hg
+commands (via `~/.hgrc` hooks), when an agent in the workspace finishes a turn,
+when a workspace is focused or created, and on herdr startup. To refresh by hand,
+run the **Refresh hg sidebar status** action (`hgwt refresh`); it rereads the
+local counts and uses the cached `↓`.
 
 ## Install
 
@@ -74,7 +121,8 @@ Setup shows a diff and asks before changing anything. It backs up each file to
 
 - `~/.config/herdr/config.toml`
   - binds `prefix+shift+g` new · `prefix+shift+o` open · `prefix+shift+y` remove ·
-    `prefix+shift+c` close repo + shares (prefix is `ctrl+b` unless you changed it)
+    `prefix+shift+c` close repo + shares (prefix is `ctrl+b` unless you changed it).
+    **Clean up** has no key; run it from herdr's action list or `hgwt prune`.
   - moves herdr's built-in git `new_worktree` to `prefix+alt+g` (Option on macOS;
     your terminal must send Option as Meta)
   - adds `$hg_bookmark` and `$hg_status` to the Space sidebar rows. If you've
@@ -101,8 +149,9 @@ The CLI works on hg repos only. For git, use `herdr worktree`.
 hgwt list [--json]                       # source repo + shares, with open workspace ids
 hgwt create --bookmark feat-x [--base main] [--no-focus]
 hgwt open   --bookmark feat-x | --path DIR [--no-focus]
-hgwt remove [--bookmark feat-x | --path DIR] [--force]   # defaults to the share you're in
-hgwt close-group
+hgwt remove [--bookmark feat-x | --path DIR] [--force] [--strip]   # defaults to the share you're in
+hgwt prune [--dry-run]
+hgwt close-group [--prune]
 ```
 
 All of these accept `--cwd DIR` (default: current directory). `create` and `open`

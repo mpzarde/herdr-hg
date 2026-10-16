@@ -5,13 +5,14 @@
 #   hgwt list   [--cwd DIR] [--json]
 #   hgwt create --bookmark NAME [--base REV] [--cwd DIR] [--no-focus]
 #   hgwt open   (--bookmark NAME | --path DIR) [--cwd DIR] [--no-focus]
-#   hgwt remove [--bookmark NAME | --path DIR] [--cwd DIR] [--force]
-#   hgwt close-group [--cwd DIR]       close the repo's workspace and all its shares
+#   hgwt remove [--bookmark NAME | --path DIR] [--cwd DIR] [--force] [--strip]
+#   hgwt prune  [--cwd DIR] [--dry-run]  remove closed shares + bookmarks whose work landed
+#   hgwt close-group [--cwd DIR] [--prune]  close the repo's workspace and all its shares
 #   hgwt setup  [--yes|--uninstall|--status|--dismiss]
 #
 # Plugin internals:
-#   hgwt action new|open|remove|close-group|setup   open the matching popup
-#   hgwt ui     new|open|remove|close-group|setup   interactive popup body (hg + git)
+#   hgwt action new|open|remove|prune|close-group|setup   open the matching popup
+#   hgwt ui     new|open|remove|prune|close-group|setup   interactive popup body
 #   hgwt refresh [--all|--event|--workspace ID|--cwd DIR] [--remote auto|force|cache]
 #   hgwt startup
 #
@@ -214,20 +215,141 @@ core_create() { # src bookmark base(empty = "." of src, or existing bookmark) ->
   else
     hg -R "$dest" update -q -r "${base:-$(hg -R "$src" log -r . -T '{node}')}" &&
       hg -R "$dest" bookmark "$name" || { warn "update/bookmark failed (share left at $dest)"; return 1; }
+    own_bm "$src" "$name"
   fi
   (cd "$dest" && pwd -P)
 }
 
 share_dirty() { hg -R "$1" status -mard 2>/dev/null | wc -l | tr -d ' '; }
+# what removing a checkout would lose: uncommitted changes plus untracked (not ignored) files
+share_unsaved() { hg -R "$1" status -mardu 2>/dev/null | wc -l | tr -d ' '; }
 
-core_remove() { # path src force(0|1); returns 3 when dirty and not forced
-  local path="$1" src="$2" force="${3:-0}" ws
+# --- bookmark hygiene --------------------------------------------------------
+# Bookmarks this plugin created are listed in the source repo's .hg, so cleanup
+# only ever deletes what it made (never `main`, or a bookmark you checked out).
+
+owned_file() { printf '%s/.hg/herdr-hg-bookmarks\n' "$1"; }
+owned_bms() { cat "$(owned_file "$1")" 2>/dev/null || true; }
+is_owned_bm() { grep -qxF -- "$2" "$(owned_file "$1")" 2>/dev/null; }
+own_bm() { is_owned_bm "$1" "$2" || printf '%s\n' "$2" >>"$(owned_file "$1")"; }
+disown_bm() {
+  local f; f="$(owned_file "$1")"; [ -f "$f" ] || return 0
+  grep -vxF -- "$2" "$f" >"$f.tmp" || true
+  if [ -s "$f.tmp" ]; then mv "$f.tmp" "$f"; else rm -f "$f.tmp" "$f"; fi
+}
+bm_exists() { hg -R "$1" log -r "bookmark('$2')" -T x >/dev/null 2>&1; }
+active_bm() { hg -R "$1" log -r . -T '{activebookmark}' 2>/dev/null || true; }
+checkouts() { printf '%s\n' "$1"; hg_shares "$1" | cut -f1; }
+bm_in_use() { # src bookmark except-path: active in another checkout?
+  local p
+  while IFS= read -r p; do
+    if [ "$p" != "$3" ] && [ "$(active_bm "$p")" = "$2" ]; then return 0; fi
+  done < <(checkouts "$1")
+  return 1
+}
+
+# Revset of the work only $2 holds: reachable from it but not public, not in
+# another bookmark, and not obsolete (rebased/landed elsewhere). Empty = landed.
+unlanded_revs() { # repo rev-expr own-bookmark
+  local others="public()" b
+  while IFS= read -r b; do
+    [ -n "$b" ] && [ "$b" != "$3" ] || continue
+    case "$b" in *"'"*|*\\*) continue ;; esac
+    others="$others or bookmark('$b')"
+  done < <(hg -R "$1" bookmarks -T '{bookmark}\n' 2>/dev/null)
+  printf 'only(%s, %s) - obsolete()\n' "$2" "$others"
+}
+# -1 when hg can't tell (bad revset, unreadable repo): callers treat that as "not landed".
+unlanded_count() {
+  local out; out="$(hg -R "$1" log -r "$(unlanded_revs "$@")" -T x 2>/dev/null)" || { echo -1; return; }
+  printf '%s\n' "${#out}"
+}
+commits_word() { if [ "$1" -ge 0 ]; then echo "$1 commit(s)"; else echo "an unknown number of commits"; fi; }
+
+# Delete bookmark $3 and strip the commits only it holds. Refuses if another
+# checkout is on them. hg keeps a backup bundle in the source's .hg/strip-backup.
+strip_bm() { # src path bookmark
+  local src="$1" path="$2" bm="$3" set p roots=() n
+  set="$(unlanded_revs "$path" "bookmark('$bm')" "$bm")"
+  while IFS= read -r p; do
+    [ "$p" != "$path" ] || continue
+    # other checkouts may not see the bookmark, so compare by node here
+    n="$(hg -R "$p" log -r . -T '{node}' 2>/dev/null)" || continue
+    if [ -n "$(hg -R "$path" log -r "$n and descendants($set)" -T x 2>/dev/null)" ]; then
+      warn "not stripping $bm: ${p/#$HOME/~} has those commits checked out"; return 1
+    fi
+  done < <(checkouts "$src")
+  while IFS= read -r n; do roots+=(-r "$n"); done < <(hg -R "$path" log -r "roots($set)" -T '{node}\n')
+  hg -R "$path" bookmark -q -d "$bm" && disown_bm "$src" "$bm"
+  # from the source repo, so the backup bundle outlives the share
+  [ ${#roots[@]} -eq 0 ] || hg -R "$src" debugstrip -q "${roots[@]}" || { warn "strip failed"; return 1; }
+  warn "stripped $bm (backup in ${src/#$HOME/~}/.hg/strip-backup)"
+}
+
+core_remove() { # path src force(0|1) strip(0|1); returns 3 when unsaved work and not forced
+  local path="$1" src="$2" force="${3:-0}" strip="${4:-0}" ws bm n
   is_share_of "$path" "$src" || { warn "refusing: $path is not a share of $src"; return 1; }
-  if [ "$force" != 1 ] && [ "$(share_dirty "$path")" -gt 0 ]; then return 3; fi
+  if [ "$force" != 1 ] && [ "$(share_unsaved "$path")" -gt 0 ]; then return 3; fi
+  # Bookmark first: everything below can kill this popup (it may live in $path's workspace).
+  bm="$(active_bm "$path")"
+  if [ -n "$bm" ] && is_owned_bm "$src" "$bm" && ! bm_in_use "$src" "$bm" "$path"; then
+    n="$(unlanded_count "$path" "bookmark('$bm')" "$bm")"
+    if [ "$n" -eq 0 ]; then
+      hg -R "$path" bookmark -q -d "$bm" && disown_bm "$src" "$bm" && warn "deleted bookmark $bm (landed)"
+    elif [ "$strip" = 1 ] && [ "$n" -gt 0 ]; then
+      strip_bm "$src" "$path" "$bm" || return 1
+    else
+      warn "kept bookmark $bm: $(commits_word "$n") not landed$([ "$n" -gt 0 ] && echo ' (--strip discards them)')"
+    fi
+  fi
   ws="$(ws_for_path "$path")"
-  [ -z "$ws" ] || herdr workspace close "$ws" >/dev/null || true
-  rm -rf -- "$path"
+  rm -rf -- "$path" "$(remote_dir "$path")"
   if [ "$(dirname "$path")" = "$WT_ROOT/$(basename "$src")" ]; then rmdir "$(dirname "$path")" 2>/dev/null || true; fi
+  [ -z "$ws" ] || herdr workspace close "$ws" >/dev/null || true
+}
+
+# Shares safe to remove without asking: no unsaved files, nothing unlanded.
+# "path\tlabel"; open ones only with include_open=1.
+prune_candidates() { # src include_open(0|1)
+  local p b
+  while IFS=$'\t' read -r p b; do
+    if [ "$2" != 1 ] && [ -n "$(ws_for_path "$p")" ]; then continue; fi
+    [ "$(share_unsaved "$p")" -eq 0 ] || continue
+    [ "$(unlanded_count "$p" . "$(active_bm "$p")")" -eq 0 ] || continue
+    printf '%s\t%s\n' "$p" "$b"
+  done < <(hg_shares "$1")
+}
+
+# Owned bookmarks no checkout uses: "bookmark\tlanded|gone|N" (N = unlanded commits)
+orphan_bms() { # src
+  local b n
+  while IFS= read -r b; do
+    [ -n "$b" ] || continue
+    if ! bm_exists "$1" "$b"; then printf '%s\tgone\n' "$b"; continue; fi
+    bm_in_use "$1" "$b" "" && continue
+    n="$(unlanded_count "$1" "bookmark('$b')" "$b")"
+    if [ "$n" -eq 0 ]; then printf '%s\tlanded\n' "$b"; else printf '%s\t%s\n' "$b" "$n"; fi
+  done < <(owned_bms "$1")
+}
+
+core_prune() { # src include_open(0|1) dry_run(0|1)
+  local src="$1" p b s n=0
+  while IFS=$'\t' read -r p b; do
+    n=$((n + 1))
+    if [ "$3" = 1 ]; then warn "would remove share ${p/#$HOME/~} ($b)"
+    else warn "removing share ${p/#$HOME/~} ($b)"; core_remove "$p" "$src" 0 0 || true; fi
+  done < <(prune_candidates "$src" "$2")
+  while IFS=$'\t' read -r b s; do
+    case "$s" in
+      gone) n=$((n + 1)); [ "$3" = 1 ] || disown_bm "$src" "$b" ;;
+      landed)
+        n=$((n + 1))
+        if [ "$3" = 1 ]; then warn "would delete bookmark $b (landed)"
+        else hg -R "$src" bookmark -q -d "$b" && disown_bm "$src" "$b" && warn "deleted bookmark $b (landed)"; fi ;;
+      *) warn "keeping bookmark $b: $(commits_word "$s") not landed (hgwt open --bookmark $b to finish it)" ;;
+    esac
+  done < <(orphan_bms "$src")
+  [ $n -gt 0 ] || warn "nothing to clean up"
 }
 
 core_close_group() { # src -> closes shares then source workspace
@@ -258,21 +380,23 @@ relabel_all() {
 
 # --- remote (incoming) cache ---------------------------------------------------
 
-remote_key() { printf '%s' "$1|$2" | cksum | awk '{ print $1 }'; }
+ck() { printf '%s' "$1" | cksum | awk '{ print $1 }'; }
+remote_dir() { printf '%s/remote/%s\n' "$CACHE" "$(ck "$1")"; }       # per checkout, removed with it
+remote_file() { printf '%s/%s\n' "$(remote_dir "$1")" "$(ck "$2")"; }
 
 # Prints cached incoming count for root $1 / label $2 ("" if unknown).
-remote_cached() { local f="$CACHE/remote/$(remote_key "$1" "$2")"; [ -f "$f" ] && awk '{ print $2 }' "$f" || true; }
+remote_cached() { local f; f="$(remote_file "$1" "$2")"; [ -f "$f" ] && awk '{ print $2 }' "$f" || true; }
 remote_stale() {
-  local f="$CACHE/remote/$(remote_key "$1" "$2")" t
+  local f t; f="$(remote_file "$1" "$2")"
   [ "$REMOTE_MINUTES" -gt 0 ] || return 1
   [ -f "$f" ] || return 0
   t="$(awk '{ print $1 }' "$f")"
   [ $(( $(date +%s) - t )) -ge $(( REMOTE_MINUTES * 60 )) ]
 }
 remote_fetch() { # root label -> writes cache "epoch count|-"
-  local r="$1" bm="$2" out n rc
-  mkdir -p "$CACHE/remote"
-  if ! hg -R "$r" paths default >/dev/null 2>&1; then echo "$(date +%s) -" >"$CACHE/remote/$(remote_key "$r" "$bm")"; return; fi
+  local r="$1" bm="$2" out n rc f
+  f="$(remote_file "$r" "$bm")"; mkdir -p "$(dirname "$f")"
+  if ! hg -R "$r" paths default >/dev/null 2>&1; then echo "$(date +%s) -" >"$f"; return; fi
   set +e
   out="$(with_timeout "$REMOTE_TIMEOUT" hg -R "$r" incoming -q -T x --config ui.interactive=false -r "$bm" </dev/null 2>/dev/null)"; rc=$?
   if [ $rc -gt 1 ]; then  # bookmark unknown on remote -> compare named branch instead
@@ -281,7 +405,7 @@ remote_fetch() { # root label -> writes cache "epoch count|-"
   fi
   set -e
   if [ $rc -le 1 ]; then n=${#out}; else n=-; fi
-  echo "$(date +%s) $n" >"$CACHE/remote/$(remote_key "$r" "$bm")"
+  echo "$(date +%s) $n" >"$f"
 }
 
 # --- sidebar tokens ----------------------------------------------------------
@@ -452,20 +576,62 @@ ui_remove() {
     echo "hg shares of ${src/#$HOME/~}:"
     path="$(share_menu "$src" 0 | pick)" || return 0
   fi
-  if [ "$(share_dirty "$path")" -gt 0 ]; then
-    hg -R "$path" status -mard
-    ans="$(ask "$(printf '\n%s uncommitted change(s) will be lost. Type "discard" to remove anyway: ' "$(share_dirty "$path")")")"
+  local force=0 strip=0 bm n
+  if [ "$(share_unsaved "$path")" -gt 0 ]; then
+    hg -R "$path" status -mardu
+    ans="$(ask "$(printf '\n%s uncommitted/untracked file(s) will be lost. Type "discard" to remove anyway: ' "$(share_unsaved "$path")")")"
     [ "$ans" = discard ] || return 0
-  else
-    ans="$(ask "Remove share ${path/#$HOME/~}? Commits and bookmarks stay in $(basename "$src"). [y/N] ")"
-    [ "$ans" = y ] || return 0
+    force=1
   fi
-  set +e; core_remove "$path" "$src" 1; rc=$?; set -e
+  bm="$(active_bm "$path")"
+  if [ -n "$bm" ] && is_owned_bm "$src" "$bm" && ! bm_in_use "$src" "$bm" "$path"; then
+    n="$(unlanded_count "$path" "bookmark('$bm')" "$bm")"
+    if [ "$n" -eq 0 ]; then
+      echo "Bookmark $bm has landed; it will be deleted too."
+    elif [ "$n" -lt 0 ]; then
+      echo "Can't tell whether bookmark $bm has landed; it will be kept."
+    else
+      printf '\nOnly bookmark %s holds these %s commit(s):\n' "$bm" "$n"
+      hg -R "$path" log -r "$(unlanded_revs "$path" "bookmark('$bm')" "$bm")" -T '  {node|short} {desc|firstline}\n'
+      ans="$(ask "$(printf '\nEnter keeps the bookmark (reopen it later). Type "strip" to delete them: ')")"
+      [ "$ans" = strip ] && strip=1
+    fi
+  fi
+  if [ $force = 0 ] && [ $strip = 0 ]; then
+    ans="$(ask "Remove share ${path/#$HOME/~}? [y/N] ")"; [ "$ans" = y ] || return 0
+  fi
+  set +e; core_remove "$path" "$src" 1 "$strip"; rc=$?; set -e
   [ $rc = 0 ] || pause "Failed — enter to close…"
 }
 
+# Lines describing what core_prune would do (empty when nothing).
+prune_preview() { # src include_open
+  local p b s
+  while IFS=$'\t' read -r p b; do printf '  remove share   %s (%s)\n' "${p/#$HOME/~}" "$b"; done < <(prune_candidates "$1" "$2")
+  while IFS=$'\t' read -r b s; do
+    case "$s" in
+      landed) printf '  delete bookmark %s (landed)\n' "$b" ;;
+      gone) ;;
+      *) printf '  keep bookmark   %s (%s not landed)\n' "$b" "$(commits_word "$s")" ;;
+    esac
+  done < <(orphan_bms "$1")
+}
+
+ui_prune() {
+  local cwd src preview ans
+  cwd="$(current_cwd)"
+  [ "$(vcs_of "$cwd")" = hg ] || { echo "Not inside an hg repository: $cwd"; pause; return; }
+  src="$(hg_source_root "$cwd")"
+  echo "Clean up ${src/#$HOME/~} (closed shares with no unsaved files and nothing unlanded):"
+  preview="$(prune_preview "$src" 0)"
+  if ! grep -qE '^  (remove|delete)' <<<"$preview"; then printf '%s\n  nothing to remove\n' "$preview" | grep .; pause; return; fi
+  printf '%s\n' "$preview"
+  ans="$(ask $'\nGo ahead? [y/N] ')"; [ "$ans" = y ] || return 0
+  core_prune "$src" 0 0; pause
+}
+
 ui_close_group() {
-  local cwd src members n ans
+  local cwd src members n ans preview
   cwd="$(current_cwd)"
   [ "$(vcs_of "$cwd")" = hg ] || { echo "Not inside an hg repository (for git use: herdr workspace close --group)"; pause; return; }
   src="$(hg_source_root "$cwd")"; members="$(group_members "$src")"
@@ -474,13 +640,20 @@ ui_close_group() {
   while IFS=$'\t' read -r ws role p; do printf '  %-4s %-7s %s\n' "$ws" "$role" "${p/#$HOME/~}"; done <<<"$members"
   ans="$(ask "$(printf '\nClose these %s workspace(s)? Running processes in them stop; files stay. [y/N] ' "$n")")"
   [ "$ans" = y ] || return 0
+  # Offer cleanup before closing: closing may take this popup with it.
+  preview="$(prune_preview "$src" 1)"
+  if grep -qE '^  (remove|delete)' <<<"$preview"; then
+    printf '\nAlso clean up?\n%s\n' "$preview"
+    ans="$(ask $'\nRemove/delete the above? [y/N] ')"
+    [ "$ans" != y ] || core_prune "$src" 1 0
+  fi
   core_close_group "$src"
 }
 
 # --- CLI ---------------------------------------------------------------------
 
 parse_cli() { # sets CLI_* vars
-  CLI_CWD="$PWD"; CLI_BM=""; CLI_BASE=""; CLI_PATH=""; CLI_FORCE=0; CLI_JSON=0
+  CLI_CWD="$PWD"; CLI_BM=""; CLI_BASE=""; CLI_PATH=""; CLI_FORCE=0; CLI_JSON=0; CLI_STRIP=0; CLI_DRY=0; CLI_PRUNE=0
   while [ $# -gt 0 ]; do
     case "$1" in
       --cwd) CLI_CWD="$2"; shift ;;
@@ -489,6 +662,9 @@ parse_cli() { # sets CLI_* vars
       --path) CLI_PATH="$(cd "$2" && pwd -P)"; shift ;;
       --force|-f) CLI_FORCE=1 ;;
       --json) CLI_JSON=1 ;;
+      --strip) CLI_STRIP=1 ;;
+      --dry-run|-n) CLI_DRY=1 ;;
+      --prune) CLI_PRUNE=1 ;;
       --no-focus) HGWT_FOCUS=0 ;;
       --focus) HGWT_FOCUS=1 ;;
       *) die "unknown option: $1" ;;
@@ -533,28 +709,32 @@ cli() {
       core_open "$t" "$CLI_SRC" | jq -Rc --arg p "$t" '{workspace_id: ., path: $p}' ;;
     remove)
       local t rc; t="$(cli_target)"
-      set +e; core_remove "$t" "$CLI_SRC" "$CLI_FORCE"; rc=$?; set -e
-      [ $rc != 3 ] || die "$t has uncommitted changes (use --force to discard)"
+      set +e; core_remove "$t" "$CLI_SRC" "$CLI_FORCE" "$CLI_STRIP"; rc=$?; set -e
+      [ $rc != 3 ] || die "$t has uncommitted changes or untracked files (use --force to discard)"
       exit $rc ;;
-    close-group) core_close_group "$CLI_SRC" ;;
+    prune) core_prune "$CLI_SRC" 0 "$CLI_DRY" ;;
+    close-group)
+      [ "$CLI_PRUNE" = 0 ] || core_prune "$CLI_SRC" 1 0
+      core_close_group "$CLI_SRC" ;;
   esac
 }
 
 # --- main --------------------------------------------------------------------
 
 case "${1:-}" in
-  list|create|open|remove|close-group) cli "$@" ;;
+  list|create|open|remove|prune|close-group) cli "$@" ;;
   action)
-    herdr plugin pane open --plugin "$PLUGIN_ID" --entrypoint "${2:?new|open|remove|close-group|setup}" >/dev/null ;;
+    herdr plugin pane open --plugin "$PLUGIN_ID" --entrypoint "${2:?new|open|remove|prune|close-group|setup}" >/dev/null ;;
   ui)
     case "${2:-}" in
-      new) ui_new ;; open) ui_open ;; remove) ui_remove ;; close-group) ui_close_group ;;
+      new) ui_new ;; open) ui_open ;; remove) ui_remove ;; prune) ui_prune ;; close-group) ui_close_group ;;
       setup) "$(dirname "$0")/hgwt-setup" <&3 || true; pause ;;
-      *) die "usage: hgwt ui new|open|remove|close-group|setup" ;;
+      *) die "usage: hgwt ui new|open|remove|prune|close-group|setup" ;;
     esac ;;
   refresh) shift; cmd_refresh "$@" ;;
   setup) shift; exec "$(dirname "$0")/hgwt-setup" "$@" ;;
   startup) # herdr startup hook: restore sidebar tokens + grouping, nudge once if not set up
+    find "$CACHE/remote" -maxdepth 1 -type f -delete 2>/dev/null || true  # pre-0.3 flat cache
     cmd_refresh --all auto || true
     relabel_all || true
     if ! "$(dirname "$0")/hgwt-setup" --status 2>/dev/null &&
@@ -562,6 +742,6 @@ case "${1:-}" in
       herdr notification show "hg worktrees: finish setup" \
         --body "Run the 'Set up hg worktrees' action, or: herdr plugin action invoke $PLUGIN_ID.setup" >/dev/null 2>&1 || true
     fi ;;
-  -h|--help|help|"") sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//' ;;
+  -h|--help|help|"") sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//' ;;
   *) die "unknown command: $1 (try: hgwt help)" ;;
 esac

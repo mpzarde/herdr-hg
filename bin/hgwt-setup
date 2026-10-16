@@ -212,7 +212,7 @@ fi
 echo "Changes to $HERDR_CONFIG:"; show_diff "$HERDR_CONFIG" "$cand_cfg"; echo
 echo "Changes to $HGRC:"; show_diff "$HGRC" "$cand_hgrc"; echo
 echo "Hook helper: $HOOK"
-echo "Command:     $SHIM (hgwt list/create/open/remove/close-group)"; echo
+echo "Command:     $SHIM (hgwt list/create/open/remove/prune/close-group)"; echo
 
 if [ "${1:-}" != --yes ]; then
   printf 'Apply? [y/N] '; read -r ans; [ "$ans" = y ] || { echo "Nothing changed."; exit 0; }
