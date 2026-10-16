@@ -1,6 +1,6 @@
 id = "mpzarde.hg-worktree"
 name = "hg worktrees"
-version = "0.4.0"
+version = "0.5.0"
 min_herdr_version = "0.9.0"
 description = "Mercurial (hg share) worktree workspaces with git fallthrough, plus hg sidebar status"
 platforms = ["linux", "macos"]
@@ -37,6 +37,12 @@ id = "close-group"
 title = "Close hg repo workspace and all its shares"
 contexts = ["workspace"]
 command = ["bin/hgwt", "action", "close-group"]
+
+[[actions]]
+id = "info"
+title = "Show hg details (bookmark, parent, remote, unpushed, shares)"
+contexts = ["workspace"]
+command = ["bin/hgwt", "action", "info"]
 
 [[actions]]
 id = "setup"
@@ -91,6 +97,14 @@ placement = "popup"
 width = "70%"
 height = 22
 command = ["bin/hgwt", "ui", "close-group"]
+
+[[panes]]
+id = "info"
+title = "hg details"
+placement = "popup"
+width = "80%"
+height = "80%"
+command = ["bin/hgwt", "ui", "info"]
 
 [[panes]]
 id = "setup"

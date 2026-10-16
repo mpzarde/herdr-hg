@@ -6,7 +6,8 @@ does two things:
 - **Worktrees for hg**: the same worktree workflow herdr has for git, using
   `hg share` checkouts and bookmarks.
 - **hg status in the sidebar**: bookmark, unpushed/incoming counts and changed
-  files for every hg repo open in herdr, whether or not you use shares.
+  files for every hg repo open in herdr, whether or not you use shares, plus a
+  details popup for everything the sidebar can't fit.
 
 herdr itself still only knows about git. This plugin checks which kind of repo
 you're in, so the same keys work in both: hg repos get `hg share`, git repos are
@@ -122,10 +123,44 @@ repo (a share or not):
     This is the state an agent gets stuck in.
 
 Setup adds both tokens to the Space sidebar rows. The status refreshes after hg
-commands (via `~/.hgrc` hooks), when an agent in the workspace finishes a turn,
-when a workspace is focused or created, and on herdr startup. To refresh by hand,
-run the **Refresh hg sidebar status** action (`hgwt refresh`); it rereads the
-local counts and uses the cached `↓`.
+commands (via `~/.hgrc` hooks), after you `cd` in a pane (via a shell hook; herdr
+has no event for that), when an agent in the workspace finishes a turn, when a
+workspace is focused or created, and on herdr startup. To refresh by hand, run
+the **Refresh hg sidebar status** action (`hgwt refresh`); it rereads the local
+counts and uses the cached `↓`.
+
+### Long bookmark names
+
+herdr cuts sidebar text off at the end, which loses the part of a bookmark that
+usually tells shares apart, like a ticket number. So the plugin shortens names
+itself, keeping the start and the end:
+`Maint_2026.1100.100_CNRLWaterborne_39478112` → `Maint_…_39478112` at 16 characters. Only the sidebar
+text and share labels change, never the bookmark.
+
+The length comes from `ui.sidebar_width` in your herdr config (26 if unset),
+minus room for `$hg_status` when it shares the bookmark's row. Setup puts them on
+one row; giving `$hg_bookmark` a row of its own, or widening the sidebar, leaves
+more of the name. Settings in config.env:
+
+- `HG_BOOKMARK_STRIP`: an extended regex removed from names before shortening,
+  e.g. `^Maint_[0-9.]+_` turns the example into `CNRLWaterborne_39478112`
+- `HG_BOOKMARK_MAX`: `auto` (default), a fixed length, or `0` to turn it off
+
+### Details popup
+
+`prefix+shift+i` (or `hgwt info`) shows everything for the checkout you're in:
+
+- the full bookmark (and whether hgwt made it and it has landed), branch, other
+  bookmarks and tags on the same commit, topic, and a warning for multiple heads
+- the working copy parent (rev, hash, phase, message, author, date), its parent,
+  and the second parent during a merge
+- an interrupted rebase/merge/etc., its unresolved files and how to continue
+- changed and untracked files, and the unpushed draft commits behind `↑`
+- remote paths and the cached incoming check; press `f` (or
+  `hgwt info --fetch`) to check now and list the incoming commits
+- shelves, and the repo's other checkouts (which are open in herdr)
+
+In a git repo it shows `git status -sb`, the last commit and the remotes.
 
 ## Install
 
@@ -158,7 +193,8 @@ Setup shows a diff and asks before changing anything. It backs up each file to
 
 - `~/.config/herdr/config.toml`
   - binds `prefix+shift+g` new · `prefix+shift+o` open · `prefix+shift+y` remove ·
-    `prefix+shift+c` close repo + shares (prefix is `ctrl+b` unless you changed it).
+    `prefix+shift+c` close repo + shares · `prefix+shift+i` details (prefix is
+    `ctrl+b` unless you changed it).
     **Clean up** has no key; run it from herdr's action list or `hgwt prune`.
   - moves herdr's built-in git `new_worktree` to `prefix+alt+g` (Option on macOS;
     your terminal must send Option as Meta)
@@ -167,8 +203,11 @@ Setup shows a diff and asks before changing anything. It backs up each file to
   - runs `herdr config check` on the result. If herdr rejects it (a key clash,
     for example), the backup is restored.
 - `~/.hgrc`: `update`, `txnclose` and `post-resolve` hooks. Outside herdr they do nothing.
-  After upgrading the plugin, `hgwt setup --status` fails until you rerun setup if
-  the hooks changed.
+- Your shell rc (`~/.zshrc`, or `~/.bashrc` for bash, picked from `$SHELL`): a
+  hook that refreshes the sidebar after `cd`. It only does anything inside a herdr
+  pane. Other shells get no hook; their sidebar updates on focus instead.
+- After upgrading the plugin, `hgwt setup --status` fails until you rerun setup if
+  any of these changed.
 - A hook helper script in the plugin config dir, and an `hgwt` command in
   `~/.local/bin` if that's on your PATH. Both look up the plugin's current
   location each time, so `herdr plugin update` doesn't break them. Setup won't
@@ -191,6 +230,7 @@ hgwt open   --bookmark feat-x | --path DIR [--label TEXT] [--no-focus]
 hgwt remove [--bookmark feat-x | --path DIR] [--force] [--strip]   # defaults to the share you're in
 hgwt prune [--dry-run]
 hgwt close-group [--prune]
+hgwt info [--fetch]                      # what the details popup shows
 ```
 
 All of these accept `--cwd DIR` or `--workspace ID` to pick the repo (default:
@@ -211,10 +251,13 @@ HG_NEW_BRANCH=bookmark                  # or branch: start new work as a named b
 HGWT_COPY=                              # globs to copy into new shares, e.g. ".env config/*.local"
 HG_REMOTE_CHECK_MINUTES=10              # incoming check interval; 0 disables
 HG_REMOTE_TIMEOUT=20                    # seconds before giving up on the remote
+HG_BOOKMARK_MAX=auto                    # sidebar name length: auto, N, or 0 (off)
+HG_BOOKMARK_STRIP=                      # regex removed from sidebar names, e.g. "^Maint_[0-9.]+_"
 HGWT_KEY_NEW=prefix+shift+g
 HGWT_KEY_OPEN=prefix+shift+o
 HGWT_KEY_REMOVE=prefix+shift+y
 HGWT_KEY_CLOSE_GROUP=prefix+shift+c
+HGWT_KEY_INFO=prefix+shift+i
 HGWT_KEY_GIT_NATIVE=prefix+alt+g
 ```
 
@@ -226,6 +269,9 @@ HGWT_KEY_GIT_NATIVE=prefix+alt+g
 - `worktree.created/opened/removed` events aren't emitted for hg shares.
 - If you edit files without running hg and no agent finishes a turn, `*N` updates
   the next time you focus the workspace.
+- No hover or scrolling for sidebar text in herdr; long names are shortened (see
+  [Long bookmark names](#long-bookmark-names)) and the details popup has the rest.
+- The `cd` hook is zsh and bash only.
 - The incoming check uses your normal hg auth but never prompts. Remotes that
   need a password prompt simply show no `↓`.
 - The setup script is typed into the new workspace's shell, so it needs a shell
