@@ -4,7 +4,7 @@
 #   ./install.sh --yes    non-interactive
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd -P)"
-for t in herdr hg jq nc; do command -v "$t" >/dev/null || { echo "install.sh: '$t' not found on PATH" >&2; exit 1; }; done
+for t in herdr hg jq nc perl; do command -v "$t" >/dev/null || { echo "install.sh: '$t' not found on PATH" >&2; exit 1; }; done
 herdr plugin link "$here" >/dev/null
 echo "Linked $here into herdr."
 exec "$here/bin/hgwt-setup" "$@"

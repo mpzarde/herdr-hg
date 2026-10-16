@@ -2,12 +2,13 @@
 # hgwt — herdr plugin: Mercurial "worktrees" via `hg share`, with git fallthrough.
 #
 # CLI (hg only; mirrors `herdr worktree`):
-#   hgwt list   [--cwd DIR] [--json]
-#   hgwt create --bookmark NAME [--base REV] [--cwd DIR] [--no-focus]
-#   hgwt open   (--bookmark NAME | --path DIR) [--cwd DIR] [--no-focus]
-#   hgwt remove [--bookmark NAME | --path DIR] [--cwd DIR] [--force] [--strip]
-#   hgwt prune  [--cwd DIR] [--dry-run]  remove closed shares + bookmarks whose work landed
-#   hgwt close-group [--cwd DIR] [--prune]  close the repo's workspace and all its shares
+#   hgwt list   [--json]
+#   hgwt create --bookmark NAME [--base REV] [--path DIR] [--label TEXT] [--no-focus]
+#   hgwt open   (--bookmark NAME | --path DIR) [--label TEXT] [--no-focus]
+#   hgwt remove [--bookmark NAME | --path DIR] [--force] [--strip]
+#   hgwt prune  [--dry-run]             remove closed shares + bookmarks whose work landed
+#   hgwt close-group [--prune]          close the repo's workspace and all its shares
+#   (all take --cwd DIR or --workspace ID to pick the repo; default: current dir)
 #   hgwt setup  [--yes|--uninstall|--status|--dismiss]
 #
 # Plugin internals:
@@ -29,6 +30,8 @@ export HGPLAIN=1
 WT_ROOT="${HG_WORKTREES_DIR:-$HOME/.herdr/worktrees}"; WT_ROOT="${WT_ROOT/#\~/$HOME}"
 LAYOUT="${HG_WORKTREES_LAYOUT:-central}"            # central | sibling
 SHARE_BOOKMARKS="${HG_SHARE_BOOKMARKS:-1}"
+NEW_KIND="${HG_NEW_BRANCH:-bookmark}"               # bookmark | branch (named branch)
+COPY_GLOBS="${HGWT_COPY:-}"                         # untracked files to copy into new shares
 REMOTE_MINUTES="${HG_REMOTE_CHECK_MINUTES:-10}"     # 0 disables incoming checks
 REMOTE_TIMEOUT="${HG_REMOTE_TIMEOUT:-20}"
 CACHE="${XDG_CACHE_HOME:-$HOME/.cache}/herdr-hg"
@@ -70,7 +73,12 @@ vcs_of() {
 }
 
 hg_root() { (cd "$1" && hg root) | { read -r r; (cd "$r" && pwd -P); }; }
-wc_label() { hg -R "$1" log -r . -T '{if(activebookmark, activebookmark, branch)}' 2>/dev/null || echo '?'; }
+wc_label() { # active bookmark, else the working copy's branch (includes a pending `hg branch`)
+  local b; b="$(hg -R "$1" log -r . -T '{activebookmark}' 2>/dev/null)" || { echo '?'; return; }
+  [ -n "$b" ] || b="$(hg -R "$1" branch 2>/dev/null || echo '?')"
+  printf '%s\n' "$b"
+}
+branch_exists() { hg -R "$1" log -r "branch('literal:$2')" -T x 2>/dev/null | grep -q .; }
 
 # Source repo of a checkout dir (itself when it isn't a share).
 source_of_root() {
@@ -96,16 +104,27 @@ is_share_of() { # dir src
   [ "$1" != "$2" ] && [ -f "$1/.hg/sharedpath" ] && [ "$(source_of_root "$1")" = "$2" ]
 }
 
-# "<path>\t<bookmark-or-branch>" for every share of $1, in either layout.
+# Shares created with --path live outside both layouts; they're listed here.
+extra_file() { printf '%s/.hg/herdr-hg-shares\n' "$1"; }
+unrecord_share() { # src path
+  local f; f="$(extra_file "$1")"; [ -f "$f" ] || return 0
+  grep -vxF -- "$2" "$f" >"$f.tmp" || true
+  if [ -s "$f.tmp" ]; then mv "$f.tmp" "$f"; else rm -f "$f.tmp" "$f"; fi
+}
+
+# "<path>\t<bookmark-or-branch>" for every share of $1: both layouts plus --path ones.
 hg_shares() {
-  local src="$1" repo d
+  local src="$1" repo d seen=$'\n'
   repo="$(basename "$src")"
-  for d in "$WT_ROOT/$repo"/*/ "$(dirname "$src")/$repo"-*/; do
+  while IFS= read -r d; do
     [ -d "$d" ] || continue
     d="$(cd "$d" && pwd -P)"
+    case "$seen" in *$'\n'"$d"$'\n'*) continue ;; esac
+    seen="$seen$d"$'\n'
     is_share_of "$d" "$src" || continue
     printf '%s\t%s\n' "$d" "$(wc_label "$d")"
-  done
+  done < <(for d in "$WT_ROOT/$repo"/*/ "$(dirname "$src")/$repo"-*/; do printf '%s\n' "$d"; done
+           cat "$(extra_file "$src")" 2>/dev/null || true)
 }
 
 find_share() { # src bookmark -> path (exact bookmark/branch match, then slug path)
@@ -183,46 +202,133 @@ focus_flag() { [ "${HGWT_FOCUS:-1}" = 1 ] && echo --focus || echo --no-focus; }
 
 # --- core operations (shared by CLI and popups) ------------------------------
 
-core_open() { # path src -> prints workspace id
-  local path="$1" src="$2" ws label
+core_open() { # path src [label] -> prints workspace id
+  local path="$1" src="$2" label="${3:-}" ws
   ws="$(ws_for_path "$path")"
   if [ -n "$ws" ]; then
     [ "${HGWT_FOCUS:-1}" = 1 ] && herdr workspace focus "$ws" >/dev/null
+    [ -z "$label" ] || herdr workspace rename "$ws" "$label" >/dev/null 2>&1 || true
     echo "$ws"; return 0
   fi
-  if [ "$path" = "$src" ]; then label="$(basename "$src")"; else label="$(share_label "$path" "$src")"; fi
+  if [ -n "$label" ]; then :   # custom labels aren't "generated", so relabeling leaves them alone
+  elif [ "$path" = "$src" ]; then label="$(basename "$src")"; else label="$(share_label "$path" "$src")"; fi
   ws="$(herdr workspace create --cwd "$path" --label "$label" "$(focus_flag)" |
         jq -r '.result.workspace.workspace_id // empty')"
   [ -n "$ws" ] || { warn "workspace create failed"; return 1; }
   if [ "$path" = "$src" ]; then relabel_all; else regroup "$ws" "$src"; fi
   refresh_ws "$ws" "$path" cache || true
+  run_pending_setup "$ws" "$path" "$src"
   echo "$ws"
 }
 
-core_create() { # src bookmark base(empty = "." of src, or existing bookmark) -> prints path
-  local src="$1" name="$2" base="${3:-}" dest
+# src name base(empty = "." of src, or the existing bookmark/branch) [path] -> prints path.
+# An existing bookmark is checked out, then an existing named branch; otherwise
+# a new bookmark (or named branch, HG_NEW_BRANCH=branch) is started at base.
+core_create() {
+  local src="$1" name="$2" base="${3:-}" dest="${4:-}"
   [ -n "$name" ] || { warn "bookmark name required"; return 1; }
-  if dest="$(find_share "$src" "$name")"; then echo "$dest"; return 0; fi
-  dest="$(share_dest "$src" "$name")"
+  if [ -z "$dest" ] && dest="$(find_share "$src" "$name")"; then echo "$dest"; return 0; fi
+  if [ -n "$dest" ]; then
+    case "$dest" in /*) ;; *) dest="$PWD/$dest" ;; esac
+    if [ -d "$dest" ] && is_share_of "$(cd "$dest" && pwd -P)" "$src"; then (cd "$dest" && pwd -P); return 0; fi
+  else
+    dest="$(share_dest "$src" "$name")"
+  fi
   [ ! -e "$dest" ] || { warn "$dest exists and is not a share of $src"; return 1; }
   mkdir -p "$(dirname "$dest")"
   local share_args=(-U); [ "$SHARE_BOOKMARKS" = 1 ] && share_args+=(-B)
   hg --config extensions.share= share -q "${share_args[@]}" "$src" "$dest" || { warn "hg share failed"; return 1; }
   # shared bookmarks only resolve with the extension loaded; enable it per-share
   printf '[extensions]\nshare =\n' >>"$dest/.hg/hgrc"
-  if [ -z "$base" ] && hg -R "$src" log -r "bookmark('$name')" -T x >/dev/null 2>&1; then
+  if [ -z "$base" ] && bm_exists "$src" "$name"; then
     hg -R "$dest" update -q -r "$name" || { warn "update to $name failed"; return 1; }
+  elif [ -z "$base" ] && branch_exists "$src" "$name"; then
+    hg -R "$dest" update -q -r "max(branch('literal:$name') and head())" || { warn "update to branch $name failed"; return 1; }
   else
-    hg -R "$dest" update -q -r "${base:-$(hg -R "$src" log -r . -T '{node}')}" &&
-      hg -R "$dest" bookmark "$name" || { warn "update/bookmark failed (share left at $dest)"; return 1; }
-    own_bm "$src" "$name"
+    hg -R "$dest" update -q -r "${base:-$(hg -R "$src" log -r . -T '{node}')}" ||
+      { warn "update failed (share left at $dest)"; return 1; }
+    if [ "$NEW_KIND" = branch ]; then
+      hg -R "$dest" branch -q "$name" || { warn "hg branch failed (share left at $dest)"; return 1; }
+    else
+      hg -R "$dest" bookmark "$name" || { warn "bookmark failed (share left at $dest)"; return 1; }
+      own_bm "$src" "$name"
+    fi
   fi
-  (cd "$dest" && pwd -P)
+  dest="$(cd "$dest" && pwd -P)"
+  [ "$dest" = "$(cd "$(share_dest "$src" "$name")" 2>/dev/null && pwd -P)" ] ||
+    grep -qxF -- "$dest" "$(extra_file "$src")" 2>/dev/null || printf '%s\n' "$dest" >>"$(extra_file "$src")"
+  bootstrap "$src" "$dest"
+  echo "$dest"
+}
+
+# --- new-share bootstrap -----------------------------------------------------
+# Copy untracked files (HGWT_COPY, .hgwt-copy, .hg/hgwt-copy globs, relative to
+# the source root) into a fresh share, never overwriting. Copies are listed in
+# the share's .hg/hgwt-copied so removal doesn't count them as unsaved work.
+
+copy_globs() { # src -> one glob per line
+  local f
+  for f in $COPY_GLOBS; do printf '%s\n' "$f"; done
+  for f in "$1/.hgwt-copy" "$1/.hg/hgwt-copy"; do
+    [ -f "$f" ] && sed 's/#.*//; s/^[[:space:]]*//; s/[[:space:]]*$//' "$f" | grep . || true
+  done
+}
+
+bootstrap() { # src dest
+  local src="$1" dest="$2" g m n=0
+  while IFS= read -r g; do
+    case "$g" in /*|..|../*|*/../*) warn "skipping copy pattern outside the repo: $g"; continue ;; esac
+    while IFS= read -r m; do
+      [ -n "$m" ] && [ -e "$src/$m" ] && [ ! -e "$dest/$m" ] || continue
+      mkdir -p "$(dirname "$dest/$m")" && cp -Rp "$src/$m" "$dest/$m" &&
+        printf '%s\n' "$m" >>"$dest/.hg/hgwt-copied" && n=$((n + 1))
+    done < <(cd "$src" && shopt -s nullglob dotglob && for m in $g; do printf '%s\n' "$m"; done)
+  done < <(copy_globs "$src")
+  [ $n = 0 ] || warn "copied $n file(s) from $(basename "$src")"
+  # the setup script runs in the new workspace (see core_open), so its output is visible there
+  [ ! -x "$src/.hg/hgwt-setup" ] || touch "$dest/.hg/hgwt-setup-pending"
+}
+
+run_pending_setup() { # ws path src
+  local p f="$2/.hg/hgwt-setup-pending"
+  [ -f "$f" ] || return 0
+  rm -f "$f"
+  p="$(herdr pane list 2>/dev/null | jq -r --arg w "$1" '[.result.panes[]? | select(.workspace_id == $w)][0].pane_id // empty')"
+  [ -n "$p" ] || { warn "no pane to run $3/.hg/hgwt-setup in"; return 0; }
+  herdr pane run "$p" "HGWT_SOURCE=$(printf %q "$3") HGWT_SHARE=$(printf %q "$2") $(printf %q "$3/.hg/hgwt-setup")" >/dev/null 2>&1 ||
+    warn "couldn't start $3/.hg/hgwt-setup"
+}
+
+# Untracked file in a share that is an unchanged copy from bootstrap.
+copied_unchanged() { # share src file
+  local e
+  while IFS= read -r e; do
+    case "$3" in "$e"|"$e"/*) cmp -s "$1/$3" "$2/$3" && return 0 ;; esac
+  done <"$1/.hg/hgwt-copied"
+  return 1
 }
 
 share_dirty() { hg -R "$1" status -mard 2>/dev/null | wc -l | tr -d ' '; }
 # what removing a checkout would lose: uncommitted changes plus untracked (not ignored) files
-share_unsaved() { hg -R "$1" status -mardu 2>/dev/null | wc -l | tr -d ' '; }
+share_unsaved() {
+  local src line n=0
+  [ -s "$1/.hg/hgwt-copied" ] || { hg -R "$1" status -mardu 2>/dev/null | wc -l | tr -d ' '; return; }
+  src="$(source_of_root "$1")"
+  while IFS= read -r line; do
+    if [ "${line%% *}" = "?" ] && copied_unchanged "$1" "$src" "${line#? }"; then continue; fi
+    n=$((n + 1))
+  done < <(hg -R "$1" status -mardu 2>/dev/null)
+  echo $n
+}
+# the lines share_unsaved counts, for showing before a discard
+unsaved_list() {
+  local src line
+  src="$(source_of_root "$1")"
+  hg -R "$1" status -mardu 2>/dev/null | while IFS= read -r line; do
+    if [ -s "$1/.hg/hgwt-copied" ] && [ "${line%% *}" = "?" ] && copied_unchanged "$1" "$src" "${line#? }"; then continue; fi
+    printf '%s\n' "$line"
+  done
+}
 
 # --- bookmark hygiene --------------------------------------------------------
 # Bookmarks this plugin created are listed in the source repo's .hg, so cleanup
@@ -304,6 +410,7 @@ core_remove() { # path src force(0|1) strip(0|1); returns 3 when unsaved work an
   fi
   ws="$(ws_for_path "$path")"
   rm -rf -- "$path" "$(remote_dir "$path")"
+  unrecord_share "$src" "$path"
   if [ "$(dirname "$path")" = "$WT_ROOT/$(basename "$src")" ]; then rmdir "$(dirname "$path")" 2>/dev/null || true; fi
   [ -z "$ws" ] || herdr workspace close "$ws" >/dev/null || true
 }
@@ -334,6 +441,9 @@ orphan_bms() { # src
 
 core_prune() { # src include_open(0|1) dry_run(0|1)
   local src="$1" p b s n=0
+  if [ "$3" != 1 ] && [ -f "$(extra_file "$src")" ]; then  # forget --path shares deleted by hand
+    while IFS= read -r p; do [ -d "$p" ] || unrecord_share "$src" "$p"; done <"$(extra_file "$src")"
+  fi
   while IFS=$'\t' read -r p b; do
     n=$((n + 1))
     if [ "$3" = 1 ]; then warn "would remove share ${p/#$HOME/~} ($b)"
@@ -410,6 +520,20 @@ remote_fetch() { # root label -> writes cache "epoch count|-"
 
 # --- sidebar tokens ----------------------------------------------------------
 
+# "!op", "!op:N" or "!N": an interrupted rebase/merge/etc. and/or N unresolved files.
+blocked_status() {
+  local r="$1" op="" kv n
+  for kv in rebase:rebasestate histedit:histedit-state graft:graftstate unshelve:shelvedstate \
+            evolve:evolvestate update:updatestate; do
+    if [ -e "$r/.hg/${kv#*:}" ]; then op="${kv%%:*}"; break; fi
+  done
+  if [ -z "$op" ] && [ -n "$(hg -R "$r" log -r 'p2()' -T x 2>/dev/null)" ]; then op=merge; fi
+  n="$(hg -R "$r" resolve -l 2>/dev/null | grep -c '^U ' || true)"
+  if [ -n "$op" ] && [ "$n" -gt 0 ]; then echo "!$op:$n"
+  elif [ -n "$op" ]; then echo "!$op"
+  elif [ "$n" -gt 0 ]; then echo "!$n"; fi
+}
+
 refresh_ws() { # ws [cwd] [remote mode: auto|force|cache]
   local ws="$1" cwd="${2:-}" mode="${3:-cache}" r bm draft dirty inc status src cur want
   [ -n "$ws" ] || return 0
@@ -428,8 +552,8 @@ refresh_ws() { # ws [cwd] [remote mode: auto|force|cache]
   draft="$(hg -R "$r" log -r 'only(., public())' -T x 2>/dev/null | wc -c | tr -d ' ')"
   dirty="$(share_dirty "$r")"
   inc="$(remote_cached "$r" "$bm")"
-  status=""
-  [ "${draft:-0}" -gt 0 ] && status="↑$draft"
+  status="$(blocked_status "$r")"
+  [ "${draft:-0}" -gt 0 ] && status="${status:+$status }↑$draft"
   case "$inc" in ''|-|0) ;; *) status="${status:+$status }↓$inc" ;; esac
   [ "${dirty:-0}" -gt 0 ] && status="${status:+$status }*$dirty"
   if [ -n "$status" ]; then
@@ -531,8 +655,10 @@ ui_new() {
   name="$(ask 'Bookmark: ')"; [ -n "$name" ] || return 0
   if find_share "$src" "$name" >/dev/null; then
     echo "Share for $name already exists, opening it."
-  elif hg -R "$src" log -r "bookmark('$name')" -T x >/dev/null 2>&1; then
+  elif bm_exists "$src" "$name"; then
     echo "Bookmark exists; the share will check it out."
+  elif branch_exists "$src" "$name"; then
+    echo "Named branch exists; the share will check out its head."
   else
     base="$(ask 'Base revision [.]: ')"
     [ -z "$base" ] || [ "$base" = . ] && base="$(hg -R "$(hg_root "$cwd")" log -r . -T '{node}')"
@@ -578,7 +704,7 @@ ui_remove() {
   fi
   local force=0 strip=0 bm n
   if [ "$(share_unsaved "$path")" -gt 0 ]; then
-    hg -R "$path" status -mardu
+    unsaved_list "$path"
     ans="$(ask "$(printf '\n%s uncommitted/untracked file(s) will be lost. Type "discard" to remove anyway: ' "$(share_unsaved "$path")")")"
     [ "$ans" = discard ] || return 0
     force=1
@@ -654,12 +780,15 @@ ui_close_group() {
 
 parse_cli() { # sets CLI_* vars
   CLI_CWD="$PWD"; CLI_BM=""; CLI_BASE=""; CLI_PATH=""; CLI_FORCE=0; CLI_JSON=0; CLI_STRIP=0; CLI_DRY=0; CLI_PRUNE=0
+  CLI_LABEL=""; local ws="" 
   while [ $# -gt 0 ]; do
     case "$1" in
       --cwd) CLI_CWD="$2"; shift ;;
       --bookmark|-b) CLI_BM="$2"; shift ;;
       --base|-r) CLI_BASE="$2"; shift ;;
-      --path) CLI_PATH="$(cd "$2" && pwd -P)"; shift ;;
+      --path) CLI_PATH="$2"; shift ;;           # resolved per command: create may name a new dir
+      --label) CLI_LABEL="$2"; shift ;;
+      --workspace) ws="$2"; shift ;;
       --force|-f) CLI_FORCE=1 ;;
       --json) CLI_JSON=1 ;;
       --strip) CLI_STRIP=1 ;;
@@ -671,12 +800,13 @@ parse_cli() { # sets CLI_* vars
     esac
     shift
   done
+  if [ -n "$ws" ]; then CLI_CWD="$(ws_cwd "$ws")"; [ -n "$CLI_CWD" ] || die "no workspace $ws"; fi
   [ "$(vcs_of "$CLI_CWD")" = hg ] || die "not inside an hg repository: $CLI_CWD (for git use: herdr worktree)"
   CLI_SRC="$(hg_source_root "$CLI_CWD")"
 }
 
 cli_target() { # resolve --path/--bookmark/current share
-  if [ -n "$CLI_PATH" ]; then echo "$CLI_PATH"
+  if [ -n "$CLI_PATH" ]; then (cd "$CLI_PATH" 2>/dev/null && pwd -P) || die "no such directory: $CLI_PATH"
   elif [ -n "$CLI_BM" ]; then find_share "$CLI_SRC" "$CLI_BM" || die "no share for '$CLI_BM'"
   else
     local r; r="$(hg_root "$CLI_CWD")"
@@ -702,11 +832,11 @@ cli() {
       fi ;;
     create)
       [ -n "$CLI_BM" ] || die "--bookmark required"
-      local dest; dest="$(core_create "$CLI_SRC" "$CLI_BM" "$CLI_BASE")" || exit 1
-      core_open "$dest" "$CLI_SRC" | jq -Rc --arg p "$dest" '{workspace_id: ., path: $p}' ;;
+      local dest; dest="$(core_create "$CLI_SRC" "$CLI_BM" "$CLI_BASE" "$CLI_PATH")" || exit 1
+      core_open "$dest" "$CLI_SRC" "$CLI_LABEL" | jq -Rc --arg p "$dest" '{workspace_id: ., path: $p}' ;;
     open)
       local t; t="$(cli_target)"
-      core_open "$t" "$CLI_SRC" | jq -Rc --arg p "$t" '{workspace_id: ., path: $p}' ;;
+      core_open "$t" "$CLI_SRC" "$CLI_LABEL" | jq -Rc --arg p "$t" '{workspace_id: ., path: $p}' ;;
     remove)
       local t rc; t="$(cli_target)"
       set +e; core_remove "$t" "$CLI_SRC" "$CLI_FORCE" "$CLI_STRIP"; rc=$?; set -e
@@ -742,6 +872,6 @@ case "${1:-}" in
       herdr notification show "hg worktrees: finish setup" \
         --body "Run the 'Set up hg worktrees' action, or: herdr plugin action invoke $PLUGIN_ID.setup" >/dev/null 2>&1 || true
     fi ;;
-  -h|--help|help|"") sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//' ;;
+  -h|--help|help|"") sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//' ;;
   *) die "unknown command: $1 (try: hgwt help)" ;;
 esac

@@ -3,7 +3,7 @@
 Working notes for herdr-hg: status, next steps, design decisions and the herdr
 quirks found while building it. User-facing docs are in [README.md](README.md).
 
-## Status (2026-10-16, v0.3.0, herdr 0.9.5, hg 7.0.2)
+## Status (2026-10-16, v0.4.0, herdr 0.9.5, hg 7.0.2)
 
 - Linked locally: `herdr plugin link ~/projects/herdr-hg`
 - Setup applied on the author's machine (`hgwt setup`). The plugin's `config.env`
@@ -31,6 +31,12 @@ quirks found while building it. User-facing docs are in [README.md](README.md).
   checkout is on those commits; `main`/pre-existing bookmarks never deleted;
   `prune` (dry-run, orphan bookmarks, open shares skipped); `close-group --prune`;
   remove/strip/prune popups via piped input; remote cache dir removed with the share
+- v0.4: copy globs (incl. dirs, outside-repo patterns skipped, no overwrite); setup
+  script runs in the new workspace's pane; unchanged copies don't block remove,
+  edited ones do; `!rebase:N` / `!rebase` / `!merge:N` / cleared after abort;
+  existing named branch checkout; `HG_NEW_BRANCH=branch`; `--path` share found by
+  list/re-create, unrecorded on remove; `--label`; `--workspace`; setup adds
+  `post-resolve` and `--status` fails on an outdated hgrc block
 - setup: idempotent rerun, byte-for-byte uninstall, existing `[keys]` table,
   customised sidebar rows left alone, key clash → rollback, foreign `hgwt` on
   PATH left alone
@@ -38,10 +44,15 @@ quirks found while building it. User-facing docs are in [README.md](README.md).
 ## Next steps
 
 1. **Manual test in a real hg repo**: `ctrl+b G` / `O` / `Y` / `C` popups and the
-   Clean up action, sizes, prompts, focus behaviour. In particular: removing the
-   share you're in from its own popup (the workspace close may kill the popup; all
-   hg work is done before that, but its messages may not be visible). Check `↓` against a real (ssh/https) remote,
-   including the timeout and no-prompt behaviour.
+   Clean up action, sizes, prompts, focus behaviour. In particular:
+   - removing the share you're in from its own popup (the workspace close may
+     kill the popup; all hg work is done before that, but its messages may not
+     be visible)
+   - `↓` against a real (ssh/https) remote, including the timeout and no-prompt
+     behaviour
+   - v0.4: `.hg/hgwt-setup` running in the new pane (shell prompt ready in time?),
+     `!` status during a real rebase/merge, the setup reminder on an outdated
+     hgrc block, and the New popup with a named branch
 2. **Publish**: create a GitHub repo, push, add the `herdr-plugin` topic (shows up
    in herdr's marketplace, which re-indexes every 30 min). Then replace `<owner>`
    in README. Not done yet: needs the account/org and public/private decision.
@@ -54,10 +65,14 @@ quirks found while building it. User-facing docs are in [README.md](README.md).
    `workspace.set_group`). That would give real nesting, `close --group` and
    `worktree.*` events, and remove the label/ordering workaround. Draft not
    written yet.
-5. Possible extras, not started:
+5. **Sync / land actions** (discussed, not started): "sync" = pull + rebase the
+   share's bookmark onto upstream (or update); "land" = push `-B` then offer prune.
+   Needs decisions: rebase vs merge, which remote, what to do with named branches.
+6. Possible extras, not started:
    - fuzzy picker when `fzf` is installed (currently a numbered list)
-   - a key binding for Clean up (left out so v0.3 didn't need a setup rerun)
-   - topics (evolve) as an alternative to bookmarks
+   - a key binding for Clean up (v0.4 needs a setup rerun anyway, so it could go in)
+   - topics (evolve) as an alternative to bookmarks; unstable-commit count in status
+   - shelve count in status
    - a test script in-repo (tests so far were ad-hoc shell; see "Testing" below)
    - Windows support (herdr supports it; this plugin is bash-only)
 
@@ -68,15 +83,33 @@ quirks found while building it. User-facing docs are in [README.md](README.md).
   Same model as `git worktree`.
 - **Bookmarks stand in for branches** (`hg share -B` so bookmarks are shared).
   Named branches are permanent in hg, so they're a poor match for throwaway
-  worktree branches.
-- **No state file**: shares are discovered by scanning both layout locations
-  and checking `.hg/sharedpath` → source. Changing layout never orphans anything.
-- **Clean up only what we made**: bookmarks created by `hgwt create` are listed in
-  `<source>/.hg/herdr-hg-bookmarks`, and only those get deleted. That file is the
-  one piece of state; it lives in the repo's metadata and is removed when empty.
+  worktree branches. Existing named branches are still checked out when named,
+  and `HG_NEW_BRANCH=branch` is there for teams that work that way; cleanup
+  leaves named branches alone.
+- **Two kinds of hg state are never touched by cleanup**: named branches and
+  bookmarks the plugin didn't create.
+- **Discovery by scanning, minimal state**: shares are found by scanning both
+  layout locations and checking `.hg/sharedpath` → source, so changing layout
+  never orphans anything. The little state there is lives inside `.hg/` and goes
+  away with the repo or share; list files are deleted when they empty:
+  - `<source>/.hg/herdr-hg-bookmarks`: bookmarks `hgwt create` made
+  - `<source>/.hg/herdr-hg-shares`: shares created with `--path`
+  - `<share>/.hg/hgwt-copied`: files bootstrap copied in
+  - `<share>/.hg/hgwt-setup-pending`: setup script still to run (create → open)
+  - the incoming cache, `$XDG_CACHE_HOME/herdr-hg/remote/<checkout>/`, removed
+    with the share
+- **Clean up only what we made**: only bookmarks listed in
+  `herdr-hg-bookmarks` get deleted.
   "Landed" = `only(B, public() or <other bookmarks>) - obsolete()` is empty. Not
   landed means keep (default) or strip (explicit), never delete the bookmark and
   leave anonymous heads behind. If hg can't evaluate it, treat it as not landed.
+- **Repo-provided code never runs by itself**: `.hgwt-copy` (data) is read from
+  the working copy, but the setup script only from `.hg/`, which clones don't
+  carry. Opting in to a committed script is a symlink.
+- **Setup script runs in the workspace pane**, not the popup: its output stays
+  visible and long installs don't block the popup or CLI. A
+  `.hg/hgwt-setup-pending` marker carries it from create to open, since
+  create runs in a `$(…)` subshell.
 - **Labels decide grouping**: `↳ x` / `repo ▸ x` labels are "generated". Only
   generated labels are rewritten, so a manual rename opts a workspace out.
 - **Regroup only on create/open/source open/close/startup**, not on every focus,
@@ -117,6 +150,12 @@ quirks found while building it. User-facing docs are in [README.md](README.md).
 - Shares made without `-B` don't see the source's bookmarks, so a revset naming a
   bookmark errors there (and an empty result looks like "nothing"). Compare by
   node in a repo that does see it.
+- The `update` hook fires (with `HG_ERROR` = unresolved count) when a merge or
+  rebase stops on conflicts, so `!` shows up without extra hooks. `hg resolve -m`
+  fires nothing, hence `post-resolve`.
+- `branch('X')` falls back to resolving X as a revision (`branch('bm')` = the
+  bookmark's branch). Use `branch('literal:X')`. `{branch}` of `.` is the
+  committed parent's branch; a pending `hg branch` only shows in `hg branch`.
 - Remote bookmarks: delete locally, then `hg push -B name` deletes it remotely.
 - macOS: bash 3.2 (`source <(…)` doesn't work, no `mapfile`/assoc arrays), no
   `timeout` (use `perl -e 'alarm …; exec …'`), BSD `sed -i ''`.
@@ -137,6 +176,11 @@ printf 'feat-b\n.\n' | HERDR_PLUGIN_CONTEXT_JSON="{\"focused_pane_cwd\":\"$S/dem
 # setup in a sandbox
 XDG_CONFIG_HOME=$S/x HGRCPATH_USER=$S/hgrc HERDR_PLUGIN_CONFIG_DIR=$S/pc HGWT_BIN_DIR=$S/bin bin/hgwt-setup --yes
 ```
+
+Every `hgwt-setup` call in a test needs those variables. One call without them
+(say, a `--uninstall` to reset first) acts on your real `~/.hgrc` and herdr
+config; that happened once during v0.4 testing and was restored from the
+`.herdr-hg.bak` files.
 
 Clean up the test workspaces afterwards (`hgwt close-group` from the test repo).
 `HGWT_FOCUS=0` keeps tests from stealing focus from your current pane.

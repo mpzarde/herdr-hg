@@ -16,13 +16,13 @@ handed to herdr's built-in `herdr worktree`.
 
 | | herdr + git | herdr-hg |
 |---|---|---|
-| New worktree | `git worktree add` + workspace | `hg share -B`, update to base, create/activate bookmark, open workspace. If the share already exists, it opens it. |
+| New worktree | `git worktree add` + workspace | `hg share -B`, then checks out an existing bookmark, or the head of an existing named branch, or starts a new bookmark at the base revision. Opens it as a workspace; if the share already exists, it opens that. Copies your untracked local files and runs an optional setup script (see [New shares](#new-shares)). |
 | Open | worktree picker | Picks from the source repo and its shares (marks which are open) and switches to or opens one |
 | Remove | `git worktree remove`, keeps branch | Deletes the checkout and closes its workspace, and cleans up the bookmark (see [Cleanup](#cleanup)). Uncommitted changes or untracked files need typing `discard` (or `--force`). |
 | Clean up | — | **prune**: removes closed shares and bookmarks whose work has landed |
 | Close repo + worktrees | `workspace close --group` | **close-group**: closes the repo's workspace and all its share workspaces, offering to prune first |
 | Sidebar grouping | shares indented under parent | Shares are labelled `↳ bookmark` and kept directly under the repo's workspace. When the repo's workspace isn't open they read `repo ▸ bookmark`. |
-| CLI | `herdr worktree list/create/open/remove` | `hgwt list/create/open/remove/prune/close-group` |
+| CLI | `herdr worktree list/create/open/remove` | `hgwt list/create/open/remove/prune/close-group`, with `--path`, `--label`, `--workspace` like herdr's |
 | Events | `worktree.*` | not emitted (herdr core only) |
 
 herdr forgets plugin sidebar data and the share grouping when it restarts, so
@@ -36,8 +36,40 @@ the plugin restores both on startup.
 | `sibling` | next to the repo: `<parent dir>/<repo>-<bookmark>` |
 
 Shares are found in both locations whichever layout is set, so changing it later
-doesn't lose track of existing ones. Each share enables the `share` extension in
-its own `.hg/hgrc` so shared bookmarks resolve; your global hgrc doesn't need it.
+doesn't lose track of existing ones. `hgwt create --path DIR` puts a share
+anywhere else; those are listed in the source repo's `.hg/herdr-hg-shares` so
+they're still found (the entry goes when the share is removed).
+
+Each share enables the `share` extension in its own `.hg/hgrc` so shared
+bookmarks resolve; your global hgrc doesn't need it.
+
+### Named branches
+
+If the name you enter is an existing named branch (and not a bookmark), the
+share checks out that branch's head and no bookmark is created. To start new work
+as named branches instead of bookmarks, set `HG_NEW_BRANCH=branch`: the share
+runs `hg branch NAME` at the base revision. Cleanup never deletes or closes named
+branches; close a finished one with `hg commit --close-branch` as usual.
+
+### New shares
+
+A share starts with only tracked files. To bring local files along (`.env`,
+local config), list glob patterns, relative to the repo root, in any of:
+
+- `.hgwt-copy` in the repo (one per line, `#` comments), to share with your team
+- `.hg/hgwt-copy` (same format, just for you)
+- `HGWT_COPY` in config.env (space-separated, applies to every repo)
+
+Matches are copied from the source checkout if they don't already exist in the
+share. Nothing is overwritten, and patterns outside the repo are skipped. Copies
+that you haven't changed don't count as unsaved work when the share is removed.
+
+For anything else (installing dependencies, starting services), make
+`.hg/hgwt-setup` an executable script. It runs in the new workspace's first pane,
+so you see its output, with `HGWT_SOURCE` and `HGWT_SHARE` set. It only runs from
+`.hg/`, which clones never contain, so a repo can't run code on your machine by
+itself. To use a script committed to the repo, opt in per checkout with
+`ln -s ../.hgwt-setup .hg/hgwt-setup`.
 
 ## Cleanup
 
@@ -62,13 +94,15 @@ share for) are never deleted. Created bookmarks are listed in the source repo's
 created before v0.3 aren't listed, so their bookmarks are kept.
 
 **prune** removes shares that are closed in herdr, have no uncommitted or
-untracked files, and whose work has landed. It also deletes created bookmarks
+untracked files (unchanged [copies](#new-shares) don't count), and whose work
+has landed. It also deletes created bookmarks
 that no checkout uses and that have landed, and lists any it keeps.
 **close-group** shows the same list (open shares included, since they're about
 to close) and asks before pruning.
 
 Deleting a local bookmark doesn't delete it on the remote. If you pushed it
-with `-B`, run `hg push -B <bookmark>` after it's deleted locally, which deletes it on the remote too.
+with `-B`, run `hg push -B <bookmark>` after it's deleted locally; that deletes
+it on the remote too.
 
 ## Sidebar status
 
@@ -83,6 +117,9 @@ repo (a share or not):
     remote. This is checked in the background and cached (10 min by default),
     and re-checked straight after `hg pull`/`push`.
   - `*N`: modified, added, removed or missing files
+  - `!op`, `!op:N` or `!N`, shown first: an interrupted rebase, merge, histedit,
+    graft, unshelve, evolve or update, and/or N files with unresolved conflicts.
+    This is the state an agent gets stuck in.
 
 Setup adds both tokens to the Space sidebar rows. The status refreshes after hg
 commands (via `~/.hgrc` hooks), when an agent in the workspace finishes a turn,
@@ -129,7 +166,9 @@ Setup shows a diff and asks before changing anything. It backs up each file to
     already customised those rows, setup leaves them alone and tells you what to add.
   - runs `herdr config check` on the result. If herdr rejects it (a key clash,
     for example), the backup is restored.
-- `~/.hgrc`: `update` and `txnclose` hooks. Outside herdr they do nothing.
+- `~/.hgrc`: `update`, `txnclose` and `post-resolve` hooks. Outside herdr they do nothing.
+  After upgrading the plugin, `hgwt setup --status` fails until you rerun setup if
+  the hooks changed.
 - A hook helper script in the plugin config dir, and an `hgwt` command in
   `~/.local/bin` if that's on your PATH. Both look up the plugin's current
   location each time, so `herdr plugin update` doesn't break them. Setup won't
@@ -147,14 +186,16 @@ The CLI works on hg repos only. For git, use `herdr worktree`.
 
 ```sh
 hgwt list [--json]                       # source repo + shares, with open workspace ids
-hgwt create --bookmark feat-x [--base main] [--no-focus]
-hgwt open   --bookmark feat-x | --path DIR [--no-focus]
+hgwt create --bookmark feat-x [--base main] [--path DIR] [--label TEXT] [--no-focus]
+hgwt open   --bookmark feat-x | --path DIR [--label TEXT] [--no-focus]
 hgwt remove [--bookmark feat-x | --path DIR] [--force] [--strip]   # defaults to the share you're in
 hgwt prune [--dry-run]
 hgwt close-group [--prune]
 ```
 
-All of these accept `--cwd DIR` (default: current directory). `create` and `open`
+All of these accept `--cwd DIR` or `--workspace ID` to pick the repo (default:
+current directory). A `--label` is kept as is: the plugin doesn't relabel it
+when the source repo opens or closes. `create` and `open`
 print `{"workspace_id": …, "path": …}`.
 
 ## Configuration
@@ -166,6 +207,8 @@ after changing keys:
 HG_WORKTREES_LAYOUT=central             # or sibling
 HG_WORKTREES_DIR=~/.herdr/worktrees     # root for the central layout
 HG_SHARE_BOOKMARKS=1                    # share bookmarks with the source (hg share -B)
+HG_NEW_BRANCH=bookmark                  # or branch: start new work as a named branch
+HGWT_COPY=                              # globs to copy into new shares, e.g. ".env config/*.local"
 HG_REMOTE_CHECK_MINUTES=10              # incoming check interval; 0 disables
 HG_REMOTE_TIMEOUT=20                    # seconds before giving up on the remote
 HGWT_KEY_NEW=prefix+shift+g
@@ -185,6 +228,8 @@ HGWT_KEY_GIT_NATIVE=prefix+alt+g
   the next time you focus the workspace.
 - The incoming check uses your normal hg auth but never prompts. Remotes that
   need a password prompt simply show no `↓`.
+- The setup script is typed into the new workspace's shell, so it needs a shell
+  prompt there (the default).
 - macOS and Linux only (bash scripts).
 - TortoiseHg's settings dialog rewrites `~/.hgrc`. If the hooks disappear after
   you use it, run `hgwt setup` again.

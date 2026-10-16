@@ -69,10 +69,11 @@ table_sets() {
     END { exit !found }' "$2"
 }
 
-is_setup() {
+is_setup() { # also false when the hgrc block is from an older version
   [ -f "$HERDR_CONFIG" ] && grep -qF "$BEGIN" "$HERDR_CONFIG" &&
-    [ -f "$HGRC" ] && grep -qF "$BEGIN" "$HGRC" && [ -x "$HOOK" ]
+    [ -f "$HGRC" ] && grep -qF "$BEGIN" "$HGRC" && [ -x "$HOOK" ] && hgrc_current
 }
+hgrc_current() { local t r; t="$(mktemp)"; plan_hgrc "$t"; cmp -s "$t" "$HGRC"; r=$?; rm -f "$t"; return $r; }
 
 # --- herdr config.toml -------------------------------------------------------
 
@@ -173,7 +174,8 @@ plan_hgrc() { # writes candidate hgrc to $1
   touch "$HGRC"
   strip_managed "$HGRC" >"$1"
   { [ -s "$1" ] && echo
-    printf '%s\n[hooks]\nupdate.herdr = %s\ntxnclose.herdr = %s\n%s\n' "$BEGIN" "$cmd" "$cmd" "$END"
+    printf '%s\n[hooks]\nupdate.herdr = %s\ntxnclose.herdr = %s\npost-resolve.herdr = %s\n%s\n' \
+      "$BEGIN" "$cmd" "$cmd" "$cmd" "$END"
   } >>"$1"
 }
 
