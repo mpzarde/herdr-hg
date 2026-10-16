@@ -139,3 +139,5 @@ HGWT_KEY_GIT_NATIVE=prefix+alt+g
 - macOS and Linux only (bash scripts).
 - TortoiseHg's settings dialog rewrites `~/.hgrc`. If the hooks disappear after
   you use it, run `hgwt setup` again.
+
+Development status, next steps and design notes: [NOTES.md](NOTES.md).
