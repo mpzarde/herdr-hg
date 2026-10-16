@@ -1,0 +1,86 @@
+id = "mpzarde.hg-worktree"
+name = "hg worktrees"
+version = "0.1.0"
+min_herdr_version = "0.9.0"
+description = "Mercurial (hg share) worktree workspaces with git fallthrough, plus hg sidebar status"
+platforms = ["linux", "macos"]
+
+# --- Actions (bind these in config.toml, see README) ------------------------
+# Each action opens a popup because creating/opening/removing needs input.
+
+[[actions]]
+id = "new"
+title = "New worktree (hg share or git worktree)"
+contexts = ["workspace"]
+command = ["bin/hgwt", "action", "new"]
+
+[[actions]]
+id = "open"
+title = "Open worktree (hg share or git worktree)"
+contexts = ["workspace"]
+command = ["bin/hgwt", "action", "open"]
+
+[[actions]]
+id = "remove"
+title = "Remove worktree (hg share or git worktree)"
+contexts = ["workspace"]
+command = ["bin/hgwt", "action", "remove"]
+
+[[actions]]
+id = "setup"
+title = "Set up hg worktrees (keys, sidebar, hg hooks)"
+contexts = ["workspace"]
+command = ["bin/hgwt", "action", "setup"]
+
+[[actions]]
+id = "refresh"
+title = "Refresh hg sidebar status"
+contexts = ["workspace"]
+command = ["bin/hgwt", "refresh"]
+
+# --- Popups ------------------------------------------------------------------
+
+[[panes]]
+id = "new"
+title = "New worktree"
+placement = "popup"
+width = 72
+height = 14
+command = ["bin/hgwt", "ui", "new"]
+
+[[panes]]
+id = "open"
+title = "Open worktree"
+placement = "popup"
+width = "70%"
+height = 20
+command = ["bin/hgwt", "ui", "open"]
+
+[[panes]]
+id = "remove"
+title = "Remove worktree"
+placement = "popup"
+width = "70%"
+height = 20
+command = ["bin/hgwt", "ui", "remove"]
+
+[[panes]]
+id = "setup"
+title = "Set up hg worktrees"
+placement = "popup"
+width = "90%"
+height = "90%"
+command = ["bin/hgwt", "ui", "setup"]
+
+# --- Keeping $hg_bookmark / $hg_status current -------------------------------
+
+[[startup]]
+command = ["bin/hgwt", "startup"]
+
+[[events]]
+on = "workspace.focused"
+command = ["bin/hgwt", "refresh", "--event"]
+
+[[events]]
+on = "workspace.created"
+command = ["bin/hgwt", "refresh", "--event"]

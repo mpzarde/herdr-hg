@@ -1,0 +1,201 @@
+#!/usr/bin/env bash
+# hgwt-setup — wire herdr-hg into herdr's config.toml and ~/.hgrc. Idempotent.
+#
+#   hgwt-setup [--yes]        apply (asks first unless --yes)
+#   hgwt-setup --uninstall    remove everything setup added
+#   hgwt-setup --status       exit 0 if set up, 1 if not
+#   hgwt-setup --dismiss      stop the startup "run setup" reminder
+#
+# Everything added is fenced by "herdr-hg" markers so it can be found and removed.
+# Files are backed up to <file>.herdr-hg.bak before each change; if herdr rejects
+# the new config, the backup is restored.
+set -euo pipefail
+
+PLUGIN_ID="mpzarde.hg-worktree"
+BEGIN="# >>> herdr-hg (managed by hgwt-setup; remove with: hgwt-setup --uninstall) >>>"
+END="# <<< herdr-hg <<<"
+TAG="# herdr-hg"
+
+herdr() { "${HERDR_BIN_PATH:-herdr}" "$@"; }
+
+HERDR_CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/herdr/config.toml"
+HGRC="${HGRCPATH_USER:-$HOME/.hgrc}"
+CONFIG_DIR="${HERDR_PLUGIN_CONFIG_DIR:-$(herdr plugin config-dir "$PLUGIN_ID" 2>/dev/null || true)}"
+[ -n "$CONFIG_DIR" ] || { echo "hgwt-setup: plugin $PLUGIN_ID is not linked/installed in herdr" >&2; exit 1; }
+HOOK="$CONFIG_DIR/hg-hook"
+
+# Keys this plugin wants. Override in $CONFIG_DIR/config.env before running setup.
+[ -f "$CONFIG_DIR/config.env" ] && . "$CONFIG_DIR/config.env"
+KEY_NEW="${HGWT_KEY_NEW:-prefix+shift+g}"
+KEY_OPEN="${HGWT_KEY_OPEN:-prefix+shift+o}"
+KEY_REMOVE="${HGWT_KEY_REMOVE:-prefix+shift+y}"
+KEY_GIT_NATIVE="${HGWT_KEY_GIT_NATIVE:-prefix+alt+g}"   # where herdr's own new_worktree moves
+ROWS='[["state_icon", "workspace"], ["branch", "git_status", "$hg_bookmark", "$hg_status"]]'
+
+# --- helpers -----------------------------------------------------------------
+
+strip_managed() { # file -> stdout without our block or tagged lines
+  awk -v b="$BEGIN" -v e="$END" -v t="$TAG" '
+    $0 == b { skip = 1; next }
+    $0 == e { skip = 0; next }
+    skip { next }
+    index($0, t) && $0 ~ /# herdr-hg$/ { next }
+    /^[[:space:]]*$/ { blanks = blanks $0 "\n"; next }   # hold blanks; drop trailing ones
+    { printf "%s", blanks; blanks = ""; print }' "$1"
+}
+
+has_table() { grep -Eq "^[[:space:]]*\[$1\][[:space:]]*(#.*)?$" "$2"; }
+
+# Insert $3 right after the [$1] header in file $2 (in place).
+insert_after_table() {
+  local tmp; tmp="$(mktemp)"
+  awk -v hdr="$1" -v line="$3" '
+    { print }
+    !done { h = $0; sub(/[[:space:]]*#.*/, "", h); gsub(/[[:space:]]/, "", h)
+            if (h == "[" hdr "]") { print line; done = 1 } }' "$2" >"$tmp" && cat "$tmp" >"$2" && rm -f "$tmp"
+}
+
+# Does table [$1] in file $2 already set key $3?
+table_sets() {
+  awk -v hdr="$1" -v key="$3" '
+    { h = $0; sub(/[[:space:]]*#.*/, "", h); gsub(/[[:space:]]/, "", h) }
+    h ~ /^\[/ { in_t = (h == "[" hdr "]"); next }
+    in_t && $0 ~ "^[[:space:]]*" key "[[:space:]]*=" { found = 1 }
+    END { exit !found }' "$2"
+}
+
+is_setup() {
+  [ -f "$HERDR_CONFIG" ] && grep -qF "$BEGIN" "$HERDR_CONFIG" &&
+    [ -f "$HGRC" ] && grep -qF "$BEGIN" "$HGRC" && [ -x "$HOOK" ]
+}
+
+# --- herdr config.toml -------------------------------------------------------
+
+plan_herdr_config() { # writes candidate config to $1, notes to stderr
+  local out="$1" block
+  mkdir -p "$(dirname "$HERDR_CONFIG")"; touch "$HERDR_CONFIG"
+  strip_managed "$HERDR_CONFIG" >"$out"
+  block="$BEGIN"$'\n'
+
+  # Move herdr's git-only new_worktree off the key we take over.
+  if has_table keys "$out"; then
+    if table_sets keys "$out" new_worktree; then
+      echo "  note: [keys].new_worktree is already customised; leaving it alone" >&2
+    else
+      insert_after_table keys "$out" "new_worktree = \"$KEY_GIT_NATIVE\"  $TAG"
+    fi
+  else
+    block+=$'[keys]\n'"new_worktree = \"$KEY_GIT_NATIVE\""$'\n\n'
+  fi
+
+  local id key desc
+  for spec in "new|$KEY_NEW|new worktree (hg/git)" \
+              "open|$KEY_OPEN|open worktree (hg/git)" \
+              "remove|$KEY_REMOVE|remove worktree (hg/git)"; do
+    IFS='|' read -r id key desc <<<"$spec"
+    block+="[[keys.command]]"$'\n'"key = \"$key\""$'\n'"type = \"plugin_action\""$'\n'
+    block+="command = \"$PLUGIN_ID.$id\""$'\n'"description = \"$desc\""$'\n\n'
+  done
+
+  # Sidebar rows: only touch them if the user hasn't customised them.
+  if table_sets ui.sidebar.spaces "$out" rows || table_sets ui.sidebar "$out" 'spaces\.rows' ||
+     table_sets ui "$out" 'sidebar\.spaces\.rows' ||
+     grep -Eq '^[[:space:]]*ui\.sidebar\.spaces\.rows[[:space:]]*=' "$out"; then
+    echo "  note: Space sidebar rows are customised; add \"\$hg_bookmark\", \"\$hg_status\" to them yourself" >&2
+  elif has_table ui.sidebar.spaces "$out"; then
+    insert_after_table ui.sidebar.spaces "$out" "rows = $ROWS  $TAG"
+  else
+    block+=$'[ui.sidebar.spaces]\n'"rows = $ROWS"$'\n'
+  fi
+
+  block+="$END"
+  { [ -s "$out" ] && echo; printf '%s\n' "$block"; } >>"$out"
+}
+
+apply_herdr_config() {
+  local cand="$1"
+  cp "$HERDR_CONFIG" "$HERDR_CONFIG.herdr-hg.bak"
+  cat "$cand" >"$HERDR_CONFIG"
+  if ! herdr config check >/dev/null 2>&1; then
+    echo "  herdr rejected the new config, restoring backup:" >&2
+    herdr config check >&2 || true
+    cp "$HERDR_CONFIG.herdr-hg.bak" "$HERDR_CONFIG"
+    echo "  Pick other keys in $CONFIG_DIR/config.env (HGWT_KEY_NEW, HGWT_KEY_OPEN," >&2
+    echo "  HGWT_KEY_REMOVE, HGWT_KEY_GIT_NATIVE) and run setup again." >&2
+    return 1
+  fi
+  herdr server reload-config >/dev/null 2>&1 || echo "  (herdr not running; config applies on next start)"
+}
+
+# --- ~/.hgrc + hook shim -----------------------------------------------------
+
+write_hook() {
+  mkdir -p "$CONFIG_DIR"
+  cat >"$HOOK" <<EOF
+#!/bin/sh
+# Installed by hgwt-setup. Called from ~/.hgrc hooks; resolves the plugin's
+# current install dir each time so 'herdr plugin update' never breaks it.
+[ -n "\$HERDR_WORKSPACE_ID" ] || exit 0
+H="\${HERDR_BIN_PATH:-herdr}"
+root=\$("\$H" plugin list --json --plugin $PLUGIN_ID 2>/dev/null | jq -r '.result.plugins[0].plugin_root // empty')
+[ -n "\$root" ] && [ -x "\$root/bin/hgwt" ] || exit 0
+HERDR_PLUGIN_CONFIG_DIR="$CONFIG_DIR" exec "\$root/bin/hgwt" refresh --cwd "\$1"
+EOF
+  chmod +x "$HOOK"
+}
+
+plan_hgrc() { # writes candidate hgrc to $1
+  local cmd="sh -c '(\"$HOOK\" \"\$PWD\" >/dev/null 2>&1 &); true'"
+  touch "$HGRC"
+  strip_managed "$HGRC" >"$1"
+  { [ -s "$1" ] && echo
+    printf '%s\n[hooks]\nupdate.herdr = %s\ntxnclose.herdr = %s\n%s\n' "$BEGIN" "$cmd" "$cmd" "$END"
+  } >>"$1"
+}
+
+# --- main --------------------------------------------------------------------
+
+show_diff() { diff -u --label "$1 (current)" --label "$1 (new)" "$1" "$2" | sed 's/^/  /' || true; }
+
+case "${1:-}" in
+  --status) is_setup; exit ;;
+  --dismiss) mkdir -p "$CONFIG_DIR"; touch "$CONFIG_DIR/.setup-dismissed"; echo "Reminder dismissed."; exit 0 ;;
+  --uninstall)
+    for f in "$HERDR_CONFIG" "$HGRC"; do
+      [ -f "$f" ] || continue
+      cp "$f" "$f.herdr-hg.bak"; tmp="$(mktemp)"; strip_managed "$f" >"$tmp"; cat "$tmp" >"$f"; rm -f "$tmp"
+      echo "cleaned $f (backup: $f.herdr-hg.bak)"
+    done
+    rm -f "$HOOK"
+    herdr server reload-config >/dev/null 2>&1 || true
+    exit 0 ;;
+  --yes|"") ;;
+  *) sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+esac
+
+command -v jq >/dev/null || { echo "hgwt-setup: jq is required" >&2; exit 1; }
+command -v hg >/dev/null || echo "warning: hg not on PATH" >&2
+
+cand_cfg="$(mktemp)"; cand_hgrc="$(mktemp)"; trap 'rm -f "$cand_cfg" "$cand_hgrc"' EXIT
+echo "herdr-hg setup"
+echo
+plan_herdr_config "$cand_cfg"
+plan_hgrc "$cand_hgrc"
+if cmp -s "$cand_cfg" "$HERDR_CONFIG" && cmp -s "$cand_hgrc" "$HGRC" && [ -x "$HOOK" ]; then
+  echo "Already set up, nothing to change."; exit 0
+fi
+echo "Changes to $HERDR_CONFIG:"; show_diff "$HERDR_CONFIG" "$cand_cfg"; echo
+echo "Changes to $HGRC:"; show_diff "$HGRC" "$cand_hgrc"; echo
+echo "Hook helper: $HOOK"; echo
+
+if [ "${1:-}" != --yes ]; then
+  printf 'Apply? [y/N] '; read -r ans; [ "$ans" = y ] || { echo "Nothing changed."; exit 0; }
+fi
+
+apply_herdr_config "$cand_cfg" || exit 1
+write_hook
+cp "$HGRC" "$HGRC.herdr-hg.bak"; cat "$cand_hgrc" >"$HGRC"
+rm -f "$CONFIG_DIR/.setup-dismissed"
+"$(dirname "$0")/hgwt" refresh --all >/dev/null 2>&1 || true
+echo "Done. Backups: $HERDR_CONFIG.herdr-hg.bak, $HGRC.herdr-hg.bak"
+echo "Keys: $KEY_NEW new · $KEY_OPEN open · $KEY_REMOVE remove · herdr's own git worktree moved to $KEY_GIT_NATIVE"

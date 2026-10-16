@@ -1,0 +1,322 @@
+#!/usr/bin/env bash
+# hgwt — herdr plugin: Mercurial "worktrees" via `hg share`, with git fallthrough.
+#
+#   hgwt action new|open|remove   open the matching popup (plugin action entrypoint)
+#   hgwt ui new|open|remove       interactive popup body
+#   hgwt setup [--yes|--uninstall|--status|--dismiss]
+#                                 wire keys/sidebar/hg hooks (see bin/hgwt-setup)
+#   hgwt refresh [--all|--event|--workspace ID|--cwd DIR]
+#                                 report $hg_bookmark / $hg_status sidebar tokens
+#
+# Kept bash 3.2 compatible (macOS /bin/bash).
+set -euo pipefail
+
+PLUGIN_ID="${HERDR_PLUGIN_ID:-mpzarde.hg-worktree}"
+SOURCE="plugin:hg-worktree"
+export HGPLAIN=1
+
+# Optional user config: HG_WORKTREES_DIR=..., HG_SHARE_BOOKMARKS=1
+if [ -n "${HERDR_PLUGIN_CONFIG_DIR:-}" ] && [ -f "$HERDR_PLUGIN_CONFIG_DIR/config.env" ]; then
+  # shellcheck disable=SC1091
+  . "$HERDR_PLUGIN_CONFIG_DIR/config.env"
+fi
+WT_ROOT="${HG_WORKTREES_DIR:-$HOME/.herdr/worktrees}"
+WT_ROOT="${WT_ROOT/#\~/$HOME}"
+SHARE_BOOKMARKS="${HG_SHARE_BOOKMARKS:-1}"
+
+exec 3<&0  # keep the popup terminal for pick(), whose stdin is a pipe
+herdr() { "${HERDR_BIN_PATH:-herdr}" "$@"; }
+die() { printf 'hgwt: %s\n' "$*" >&2; exit 1; }
+ctx() { [ -n "${HERDR_PLUGIN_CONTEXT_JSON:-}" ] && jq -r "$1 // empty" <<<"$HERDR_PLUGIN_CONTEXT_JSON" || true; }
+
+# Raw socket request for methods the CLI doesn't expose (workspace.move).
+sock() {
+  printf '{"id":"hgwt:%s","method":"%s","params":%s}\n' "$1" "$1" "$2" |
+    nc -U -w 2 "$HERDR_SOCKET_PATH" 2>/dev/null | head -n 1
+}
+
+# --- context -----------------------------------------------------------------
+
+current_cwd() {
+  local d
+  d="$(ctx .focused_pane_cwd)"; [ -n "$d" ] || d="$(ctx .workspace_cwd)"
+  [ -n "$d" ] || d="${HERDR_ACTIVE_PANE_CWD:-$PWD}"
+  printf '%s\n' "$d"
+}
+current_ws() {
+  local w; w="$(ctx .workspace_id)"
+  printf '%s\n' "${w:-${HERDR_WORKSPACE_ID:-${HERDR_ACTIVE_WORKSPACE_ID:-}}}"
+}
+
+# hg | git | none  (deepest repo root wins if both)
+vcs_of() {
+  local hr gr
+  hr="$(cd "$1" 2>/dev/null && hg root 2>/dev/null || true)"
+  gr="$(git -C "$1" rev-parse --show-toplevel 2>/dev/null || true)"
+  if [ -n "$hr" ] && [ ${#hr} -ge ${#gr} ]; then echo hg
+  elif [ -n "$gr" ]; then echo git
+  else echo none; fi
+}
+
+hg_root() { (cd "$1" && hg root); }
+
+# Root of the source repo, whether $1 is inside the source or one of its shares.
+hg_source_root() {
+  local r sp
+  r="$(hg_root "$1")"
+  if [ -f "$r/.hg/sharedpath" ]; then
+    sp="$(cat "$r/.hg/sharedpath")"
+    case "$sp" in /*) ;; *) sp="$r/.hg/$sp" ;; esac
+    (cd "$sp/.." && pwd -P)
+  else
+    (cd "$r" && pwd -P)
+  fi
+}
+
+slug() { printf '%s' "$1" | tr -c 'A-Za-z0-9._-' '-' | sed 's/--*/-/g; s/^-//; s/-$//'; }
+
+# Prints "<path>\t<bookmark-or-branch>" for every share of source repo $1.
+hg_shares() {
+  local src="$1" base d sp tgt label
+  base="$WT_ROOT/$(basename "$src")"
+  [ -d "$base" ] || return 0
+  for d in "$base"/*/; do
+    d="${d%/}"
+    [ -f "$d/.hg/sharedpath" ] || continue
+    sp="$(cat "$d/.hg/sharedpath")"
+    tgt="$(cd "$sp/.." 2>/dev/null && pwd -P || true)"
+    [ "$tgt" = "$src" ] || continue
+    label="$(hg -R "$d" log -r . -T '{if(activebookmark, activebookmark, branch)}' 2>/dev/null || echo '?')"
+    printf '%s\t%s\n' "$d" "$label"
+  done
+}
+
+# Workspace id whose pane cwd is $1 (or inside it), if open.
+ws_for_path() {
+  herdr pane list 2>/dev/null | jq -r --arg p "$1" '
+    [.result.panes[]? | select(.cwd == $p or (.cwd | startswith($p + "/")))] | .[0].workspace_id // empty'
+}
+
+ws_cwd() {
+  herdr pane list --workspace "$1" 2>/dev/null | jq -r '
+    (.result.panes // []) | (map(select(.focused)) + .) | .[0].cwd // empty'
+}
+
+# Place workspace $1 directly after $2 and any of $2's shares already adjacent,
+# approximating herdr's native worktree grouping.
+place_after() {
+  local ws="$1" parent="$2" src="$3" ids idx i id cwd
+  [ -n "$parent" ] || return 0
+  ids="$(herdr workspace list | jq -r '.result.workspaces[].workspace_id')"
+  idx=-1; i=0
+  for id in $ids; do
+    if [ "$id" = "$parent" ]; then idx=$i
+    elif [ $idx -ge 0 ] && [ "$id" != "$ws" ]; then
+      cwd="$(ws_cwd "$id")"
+      case "$cwd" in "$WT_ROOT/$(basename "$src")/"*) idx=$i ;; *) break ;; esac
+    fi
+    i=$((i + 1))
+  done
+  [ $idx -ge 0 ] || return 0
+  sock workspace.move "{\"workspace_id\":\"$ws\",\"insert_index\":$((idx + 1))}" >/dev/null || true
+}
+
+open_share_ws() { # path label parent_ws src
+  local ws
+  ws="$(ws_for_path "$1")"
+  if [ -n "$ws" ]; then herdr workspace focus "$ws" >/dev/null; return; fi
+  ws="$(herdr workspace create --cwd "$1" --label "$2" $( [ "${HGWT_FOCUS:-1}" = 1 ] && echo --focus || echo --no-focus ) | jq -r '.result.workspace.workspace_id // empty')"
+  [ -n "$ws" ] || die "workspace create failed"
+  place_after "$ws" "$3" "$4"
+  refresh_ws "$ws" "$1"
+}
+
+# --- sidebar tokens ----------------------------------------------------------
+
+refresh_ws() { # ws [cwd]
+  local ws="$1" cwd="${2:-}" r bm draft dirty status
+  [ -n "$ws" ] || return 0
+  [ -n "$cwd" ] || cwd="$(ws_cwd "$ws")"
+  if [ -z "$cwd" ] || [ "$(vcs_of "$cwd")" != hg ]; then
+    herdr workspace report-metadata "$ws" --source "$SOURCE" \
+      --clear-token hg_bookmark --clear-token hg_status >/dev/null 2>&1 || true
+    return 0
+  fi
+  r="$(hg_root "$cwd")"
+  bm="$(hg -R "$r" log -r . -T '{if(activebookmark, activebookmark, branch)}' 2>/dev/null || true)"
+  # "ahead" ≈ draft (unpublished) ancestors of the working copy; dirty = changed files
+  draft="$(hg -R "$r" log -r 'only(., public())' -T x 2>/dev/null | wc -c | tr -d ' ')"
+  dirty="$(hg -R "$r" status -mard 2>/dev/null | wc -l | tr -d ' ')"
+  status=""
+  [ "${draft:-0}" -gt 0 ] && status="↑$draft"
+  [ "${dirty:-0}" -gt 0 ] && status="${status:+$status }*$dirty"
+  if [ -n "$status" ]; then
+    herdr workspace report-metadata "$ws" --source "$SOURCE" \
+      --token "hg_bookmark=$bm" --token "hg_status=$status" >/dev/null
+  else
+    herdr workspace report-metadata "$ws" --source "$SOURCE" \
+      --token "hg_bookmark=$bm" --clear-token hg_status >/dev/null
+  fi
+}
+
+cmd_refresh() {
+  case "${1:-}" in
+    --all)
+      for ws in $(herdr workspace list | jq -r '.result.workspaces[].workspace_id'); do
+        refresh_ws "$ws" || true
+      done ;;
+    --event)
+      refresh_ws "$(jq -r '[.. | objects | .workspace_id? // empty] | .[0] // empty' \
+        <<<"${HERDR_PLUGIN_EVENT_JSON:-{\}}")" ;;
+    --workspace) refresh_ws "$2" "${3:-}" ;;
+    --cwd) # used by hg hooks inside a herdr pane
+      [ -n "${HERDR_WORKSPACE_ID:-}" ] || exit 0
+      refresh_ws "$HERDR_WORKSPACE_ID" "$2" ;;
+    *) refresh_ws "$(current_ws)" ;;
+  esac
+}
+
+# --- popup UI ----------------------------------------------------------------
+
+pause() { printf '\n%s' "${1:-Press enter to close…}"; read -r _ || true; }
+
+# Numbered picker over stdin lines "value\tdisplay"; echoes chosen value.
+pick() {
+  local lines=() line n i choice
+  while IFS= read -r line; do lines+=("$line"); done
+  n=${#lines[@]}
+  if [ "$n" -eq 0 ]; then echo "  (none)" >&2; pause; return 1; fi
+  i=1
+  for line in "${lines[@]}"; do printf '  %2d) %s\n' "$i" "${line#*$'\t'}" >&2; i=$((i + 1)); done
+  printf '\nChoose [1-%d, empty to cancel]: ' "$n" >&2
+  read -r choice <&3 || return 1
+  case "$choice" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$choice" -ge 1 ] && [ "$choice" -le "$n" ] || return 1
+  line="${lines[$((choice - 1))]}"; printf '%s\n' "${line%%$'\t'*}"
+}
+
+ui_new() {
+  local cwd vcs src name base dest repo
+  cwd="$(current_cwd)"; vcs="$(vcs_of "$cwd")"
+  case "$vcs" in
+    none) echo "Not inside an hg or git repository: $cwd"; pause; return ;;
+    git)
+      echo "git repo: $(git -C "$cwd" rev-parse --show-toplevel)"
+      printf 'Branch: '; read -r name; [ -n "$name" ] || return 0
+      printf 'Base ref [HEAD]: '; read -r base
+      herdr worktree create --cwd "$cwd" --branch "$name" ${base:+--base "$base"} --focus >/dev/null \
+        || pause "git worktree create failed — enter to close…"
+      return ;;
+  esac
+  src="$(hg_source_root "$cwd")"; repo="$(basename "$src")"
+  echo "hg repo: $src"
+  printf 'Bookmark: '; read -r name; [ -n "$name" ] || return 0
+  dest="$WT_ROOT/$repo/$(slug "$name")"
+  if [ -d "$dest/.hg" ]; then
+    echo "Share already exists, opening $dest"
+    open_share_ws "$dest" "$repo ▸ $name" "$(ws_for_path "$src")" "$src"; return
+  fi
+  if hg -R "$src" log -r "bookmark('$name')" -T x >/dev/null 2>&1; then
+    echo "Bookmark exists; the share will check it out."; base=""
+  else
+    printf 'Base revision [.]: '; read -r base; base="${base:-.}"
+    [ "$base" = "." ] && base="$(hg -R "$(hg_root "$cwd")" log -r . -T '{node}')"
+  fi
+  mkdir -p "$(dirname "$dest")"
+  if ! {
+    hg --config extensions.share= share -U $([ "$SHARE_BOOKMARKS" = 1 ] && echo -B) "$src" "$dest" &&
+      # shared bookmarks only resolve with the extension loaded; enable it per-share
+      printf '[extensions]\nshare =\n' >>"$dest/.hg/hgrc" &&
+      if [ -n "$base" ]; then hg -R "$dest" update -q -r "$base" && hg -R "$dest" bookmark "$name"
+      else hg -R "$dest" update -q -r "$name"; fi
+  }; then
+    pause "hg share failed — enter to close…"; return
+  fi
+  open_share_ws "$dest" "$repo ▸ $name" "$(ws_for_path "$src")" "$src"
+}
+
+ui_open() {
+  local cwd vcs src repo path
+  cwd="$(current_cwd)"; vcs="$(vcs_of "$cwd")"
+  case "$vcs" in
+    none) echo "Not inside an hg or git repository: $cwd"; pause; return ;;
+    git)
+      echo "git worktrees:"
+      path="$(herdr worktree list --cwd "$cwd" | jq -r '
+          .result.worktrees[]? | "\(.path)\t\(.branch // "(detached)")  \(.path)"' | pick)" || return 0
+      herdr worktree open --cwd "$cwd" --path "$path" --focus >/dev/null || pause "open failed…"
+      return ;;
+  esac
+  src="$(hg_source_root "$cwd")"; repo="$(basename "$src")"
+  echo "hg shares of $src:"
+  path="$( { printf '%s\t%s  (source)\n' "$src" "$repo"
+             hg_shares "$src" | while IFS=$'\t' read -r p b; do
+               printf '%s\t%s  %s%s\n' "$p" "$b" "$p" "$([ -n "$(ws_for_path "$p")" ] && echo '  [open]')"
+             done; } | pick)" || return 0
+  if [ "$path" = "$src" ]; then
+    open_share_ws "$src" "$repo" "" "$src"
+  else
+    open_share_ws "$path" "$repo ▸ $(hg -R "$path" log -r . -T '{if(activebookmark, activebookmark, branch)}')" \
+      "$(ws_for_path "$src")" "$src"
+  fi
+}
+
+ui_remove() {
+  local cwd vcs src path ws dirty ans r
+  cwd="$(current_cwd)"; vcs="$(vcs_of "$cwd")"
+  case "$vcs" in
+    none) echo "Not inside an hg or git repository: $cwd"; pause; return ;;
+    git)
+      printf 'Remove git worktree for workspace %s? [y/N] ' "$(current_ws)"; read -r ans
+      [ "$ans" = y ] || return 0
+      herdr worktree remove --workspace "$(current_ws)" >/dev/null || pause "remove failed…"
+      return ;;
+  esac
+  src="$(hg_source_root "$cwd")"; r="$(hg_root "$cwd")"
+  if [ "$(cd "$r" && pwd -P)" != "$src" ]; then
+    path="$r"; echo "Current workspace is a share: $path"
+  else
+    echo "hg shares of $src:"
+    path="$(hg_shares "$src" | while IFS=$'\t' read -r p b; do printf '%s\t%s  %s\n' "$p" "$b" "$p"; done | pick)" || return 0
+  fi
+  # Safety: only ever delete share checkouts under our root.
+  case "$path" in "$WT_ROOT"/*) ;; *) die "refusing to remove $path (not under $WT_ROOT)" ;; esac
+  [ -f "$path/.hg/sharedpath" ] || die "refusing to remove $path (not an hg share)"
+  dirty="$(hg -R "$path" status -mard | wc -l | tr -d ' ')"
+  if [ "$dirty" -gt 0 ]; then
+    hg -R "$path" status -mard
+    printf '\n%s uncommitted change(s) will be lost. Type "discard" to remove anyway: ' "$dirty"
+    read -r ans; [ "$ans" = discard ] || return 0
+  else
+    printf 'Remove share %s? Commits and bookmarks stay in %s. [y/N] ' "$path" "$(basename "$src")"
+    read -r ans; [ "$ans" = y ] || return 0
+  fi
+  ws="$(ws_for_path "$path")"
+  if [ -n "$ws" ]; then herdr workspace close "$ws" >/dev/null || true; fi
+  rm -rf -- "$path"
+  rmdir "$(dirname "$path")" 2>/dev/null || true
+}
+
+# --- main --------------------------------------------------------------------
+
+case "${1:-}" in
+  action)
+    herdr plugin pane open --plugin "$PLUGIN_ID" --entrypoint "${2:?new|open|remove|setup}" >/dev/null ;;
+  ui)
+    case "${2:-}" in
+      new) ui_new ;; open) ui_open ;; remove) ui_remove ;;
+      setup) "$(dirname "$0")/hgwt-setup" || true; pause ;;
+      *) die "usage: hgwt ui new|open|remove|setup" ;;
+    esac ;;
+  refresh) shift; cmd_refresh "$@" ;;
+  setup) shift; exec "$(dirname "$0")/hgwt-setup" "$@" ;;
+  startup) # herdr startup hook: restore sidebar tokens, nudge once if not set up
+    cmd_refresh --all || true
+    if ! "$(dirname "$0")/hgwt-setup" --status 2>/dev/null &&
+       [ ! -f "${HERDR_PLUGIN_CONFIG_DIR:-/nonexistent}/.setup-dismissed" ]; then
+      herdr notification show "hg worktrees: finish setup" \
+        --body "Run the 'Set up hg worktrees' action, or: herdr plugin action invoke $PLUGIN_ID.setup" >/dev/null 2>&1 || true
+    fi ;;
+  shares) hg_shares "$(hg_source_root "${2:-$PWD}")" ;;
+  *) sed -n '2,9p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+esac
