@@ -23,12 +23,17 @@ HGRC="${HGRCPATH_USER:-$HOME/.hgrc}"
 CONFIG_DIR="${HERDR_PLUGIN_CONFIG_DIR:-$(herdr plugin config-dir "$PLUGIN_ID" 2>/dev/null || true)}"
 [ -n "$CONFIG_DIR" ] || { echo "hgwt-setup: plugin $PLUGIN_ID is not linked/installed in herdr" >&2; exit 1; }
 HOOK="$CONFIG_DIR/hg-hook"
+# CLI shim goes in ~/.local/bin (where herdr's installer puts herdr) if it's on PATH
+BIN_DIR="${HGWT_BIN_DIR:-$HOME/.local/bin}"
+SHIM="$BIN_DIR/hgwt"
+SHIM_MARK="# hgwt shim (managed by herdr-hg setup)"
 
 # Keys this plugin wants. Override in $CONFIG_DIR/config.env before running setup.
 [ -f "$CONFIG_DIR/config.env" ] && . "$CONFIG_DIR/config.env"
 KEY_NEW="${HGWT_KEY_NEW:-prefix+shift+g}"
 KEY_OPEN="${HGWT_KEY_OPEN:-prefix+shift+o}"
 KEY_REMOVE="${HGWT_KEY_REMOVE:-prefix+shift+y}"
+KEY_CLOSE_GROUP="${HGWT_KEY_CLOSE_GROUP:-prefix+shift+c}"
 KEY_GIT_NATIVE="${HGWT_KEY_GIT_NATIVE:-prefix+alt+g}"   # where herdr's own new_worktree moves
 ROWS='[["state_icon", "workspace"], ["branch", "git_status", "$hg_bookmark", "$hg_status"]]'
 
@@ -91,7 +96,8 @@ plan_herdr_config() { # writes candidate config to $1, notes to stderr
   local id key desc
   for spec in "new|$KEY_NEW|new worktree (hg/git)" \
               "open|$KEY_OPEN|open worktree (hg/git)" \
-              "remove|$KEY_REMOVE|remove worktree (hg/git)"; do
+              "remove|$KEY_REMOVE|remove worktree (hg/git)" \
+              "close-group|$KEY_CLOSE_GROUP|close hg repo + shares"; do
     IFS='|' read -r id key desc <<<"$spec"
     block+="[[keys.command]]"$'\n'"key = \"$key\""$'\n'"type = \"plugin_action\""$'\n'
     block+="command = \"$PLUGIN_ID.$id\""$'\n'"description = \"$desc\""$'\n\n'
@@ -135,13 +141,31 @@ write_hook() {
 #!/bin/sh
 # Installed by hgwt-setup. Called from ~/.hgrc hooks; resolves the plugin's
 # current install dir each time so 'herdr plugin update' never breaks it.
-[ -n "\$HERDR_WORKSPACE_ID" ] || exit 0
+[ -n "\$HERDR_ENV\$HERDR_WORKSPACE_ID" ] || exit 0
 H="\${HERDR_BIN_PATH:-herdr}"
 root=\$("\$H" plugin list --json --plugin $PLUGIN_ID 2>/dev/null | jq -r '.result.plugins[0].plugin_root // empty')
 [ -n "\$root" ] && [ -x "\$root/bin/hgwt" ] || exit 0
 HERDR_PLUGIN_CONFIG_DIR="$CONFIG_DIR" exec "\$root/bin/hgwt" refresh --cwd "\$1"
 EOF
   chmod +x "$HOOK"
+}
+
+on_path() { case ":$PATH:" in *":$BIN_DIR:"*) return 0 ;; *) return 1 ;; esac; }
+shim_ours() { [ ! -e "$SHIM" ] || grep -qF "$SHIM_MARK" "$SHIM" 2>/dev/null; }
+shim_needed() { on_path && shim_ours && [ ! -x "$SHIM" ]; }
+write_shim() {
+  on_path || { echo "  note: $BIN_DIR is not on PATH; skipping the hgwt command"; return 0; }
+  shim_ours || { echo "  note: $SHIM exists and isn't ours; leaving it alone"; return 0; }
+  mkdir -p "$BIN_DIR"
+  cat >"$SHIM" <<SHIMEOF
+#!/bin/sh
+$SHIM_MARK
+# Resolves the plugin's current install dir so 'herdr plugin update' never breaks it.
+root=\$(herdr plugin list --json --plugin $PLUGIN_ID 2>/dev/null | jq -r '.result.plugins[0].plugin_root // empty')
+[ -n "\$root" ] || { echo "hgwt: plugin $PLUGIN_ID is not installed in herdr" >&2; exit 1; }
+exec "\$root/bin/hgwt" "\$@"
+SHIMEOF
+  chmod +x "$SHIM"
 }
 
 plan_hgrc() { # writes candidate hgrc to $1
@@ -167,6 +191,7 @@ case "${1:-}" in
       echo "cleaned $f (backup: $f.herdr-hg.bak)"
     done
     rm -f "$HOOK"
+    if [ -f "$SHIM" ] && grep -qF "$SHIM_MARK" "$SHIM"; then rm -f "$SHIM"; echo "removed $SHIM"; fi
     herdr server reload-config >/dev/null 2>&1 || true
     exit 0 ;;
   --yes|"") ;;
@@ -181,12 +206,13 @@ echo "herdr-hg setup"
 echo
 plan_herdr_config "$cand_cfg"
 plan_hgrc "$cand_hgrc"
-if cmp -s "$cand_cfg" "$HERDR_CONFIG" && cmp -s "$cand_hgrc" "$HGRC" && [ -x "$HOOK" ]; then
+if cmp -s "$cand_cfg" "$HERDR_CONFIG" && cmp -s "$cand_hgrc" "$HGRC" && [ -x "$HOOK" ] && ! shim_needed; then
   echo "Already set up, nothing to change."; exit 0
 fi
 echo "Changes to $HERDR_CONFIG:"; show_diff "$HERDR_CONFIG" "$cand_cfg"; echo
 echo "Changes to $HGRC:"; show_diff "$HGRC" "$cand_hgrc"; echo
-echo "Hook helper: $HOOK"; echo
+echo "Hook helper: $HOOK"
+echo "Command:     $SHIM (hgwt list/create/open/remove/close-group)"; echo
 
 if [ "${1:-}" != --yes ]; then
   printf 'Apply? [y/N] '; read -r ans; [ "$ans" = y ] || { echo "Nothing changed."; exit 0; }
@@ -194,8 +220,10 @@ fi
 
 apply_herdr_config "$cand_cfg" || exit 1
 write_hook
+write_shim
 cp "$HGRC" "$HGRC.herdr-hg.bak"; cat "$cand_hgrc" >"$HGRC"
 rm -f "$CONFIG_DIR/.setup-dismissed"
 "$(dirname "$0")/hgwt" refresh --all >/dev/null 2>&1 || true
 echo "Done. Backups: $HERDR_CONFIG.herdr-hg.bak, $HGRC.herdr-hg.bak"
-echo "Keys: $KEY_NEW new · $KEY_OPEN open · $KEY_REMOVE remove · herdr's own git worktree moved to $KEY_GIT_NATIVE"
+echo "Keys: $KEY_NEW new · $KEY_OPEN open · $KEY_REMOVE remove · $KEY_CLOSE_GROUP close repo+shares"
+echo "      herdr's own git worktree key moved to $KEY_GIT_NATIVE"
