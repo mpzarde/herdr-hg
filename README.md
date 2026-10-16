@@ -123,11 +123,10 @@ repo (a share or not):
     This is the state an agent gets stuck in.
 
 Setup adds both tokens to the Space sidebar rows. The status refreshes after hg
-commands (via `~/.hgrc` hooks), after you `cd` in a pane (via a shell hook; herdr
-has no event for that), when an agent in the workspace finishes a turn, when a
-workspace is focused or created, and on herdr startup. To refresh by hand, run
-the **Refresh hg sidebar status** action (`hgwt refresh`); it rereads the local
-counts and uses the cached `↓`.
+commands (via `~/.hgrc` hooks), when an agent in the workspace finishes a turn,
+when a workspace is focused or created, and on herdr startup. To refresh by hand,
+run the **Refresh hg sidebar status** action (`hgwt refresh`); it rereads the
+local counts and uses the cached `↓`.
 
 ### Long bookmark names
 
@@ -203,11 +202,8 @@ Setup shows a diff and asks before changing anything. It backs up each file to
   - runs `herdr config check` on the result. If herdr rejects it (a key clash,
     for example), the backup is restored.
 - `~/.hgrc`: `update`, `txnclose` and `post-resolve` hooks. Outside herdr they do nothing.
-- Your shell rc (`~/.zshrc`, or `~/.bashrc` for bash, picked from `$SHELL`): a
-  hook that refreshes the sidebar after `cd`. It only does anything inside a herdr
-  pane. Other shells get no hook; their sidebar updates on focus instead.
 - After upgrading the plugin, `hgwt setup --status` fails until you rerun setup if
-  any of these changed.
+  the hooks changed.
 - A hook helper script in the plugin config dir, and an `hgwt` command in
   `~/.local/bin` if that's on your PATH. Both look up the plugin's current
   location each time, so `herdr plugin update` doesn't break them. Setup won't
@@ -271,7 +267,10 @@ HGWT_KEY_GIT_NATIVE=prefix+alt+g
   the next time you focus the workspace.
 - No hover or scrolling for sidebar text in herdr; long names are shortened (see
   [Long bookmark names](#long-bookmark-names)) and the details popup has the rest.
-- The `cd` hook is zsh and bash only.
+- herdr sends no event when a pane changes directory, so after a `cd` into or
+  out of a repo the hg status is stale until the next refresh (focusing the
+  workspace, an hg command, an agent finishing a turn, or the Refresh action).
+  Setup deliberately doesn't hook your shell rc to catch it.
 - The incoming check uses your normal hg auth but never prompts. Remotes that
   need a password prompt simply show no `↓`.
 - The setup script is typed into the new workspace's shell, so it needs a shell

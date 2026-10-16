@@ -15,7 +15,7 @@
 # Plugin internals:
 #   hgwt action new|open|remove|prune|close-group|info|setup   open the matching popup
 #   hgwt ui     new|open|remove|prune|close-group|info|setup   interactive popup body
-#   hgwt refresh [--all|--event|--workspace ID|--cwd DIR|--pane ID DIR] [auto|force|cache]
+#   hgwt refresh [--all|--event|--workspace ID|--cwd DIR] [--remote auto|force|cache]
 #   hgwt startup
 #
 # Kept bash 3.2 compatible (macOS /bin/bash).
@@ -640,19 +640,6 @@ cmd_refresh() {
         *) refresh_ws "$(event_ws)" "" auto ;;
       esac ;;
     --workspace) refresh_ws "$arg" "" "$mode" ;;
-    --pane) # from the shell's cd hook: herdr has no cwd-changed event. $3 is the new dir.
-      local pl dir="${3:-}"
-      pl="$(herdr pane list 2>/dev/null)" || exit 0
-      ws="$(jq -r --arg p "$arg" '.result.panes[]? | select(.pane_id == $p) | .workspace_id' <<<"$pl")"
-      [ -n "$ws" ] || exit 0
-      # the sidebar follows the pane ws_map picks (focused, else first); herdr may not
-      # have seen the new cwd yet, so use the one the shell passed for that pane
-      if [ -n "$dir" ] && [ "$(jq -r --arg w "$ws" '[.result.panes[]? | select(.workspace_id == $w)]
-           | (map(select(.focused)) + .) | .[0].pane_id // empty' <<<"$pl")" = "$arg" ]; then
-        refresh_ws "$ws" "$dir" cache
-      else
-        refresh_ws "$ws" "" cache
-      fi ;;
     --cwd) # from ~/.hgrc hooks; the hg command may target any repo (hg -R, cd), so
            # refresh whichever workspaces have that repo open. pull/push refetch remote.
       [ -n "${HERDR_ENV:-}${HERDR_WORKSPACE_ID:-}" ] || exit 0

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# hgwt-setup — wire herdr-hg into herdr's config.toml, ~/.hgrc and your shell rc. Idempotent.
+# hgwt-setup — wire herdr-hg into herdr's config.toml and ~/.hgrc. Idempotent.
 #
 #   hgwt-setup [--yes]        apply (asks first unless --yes)
 #   hgwt-setup --uninstall    remove everything setup added
@@ -20,12 +20,6 @@ herdr() { "${HERDR_BIN_PATH:-herdr}" "$@"; }
 
 HERDR_CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/herdr/config.toml"
 HGRC="${HGRCPATH_USER:-$HOME/.hgrc}"
-# herdr has no "cwd changed" event, so a shell hook refreshes the sidebar on cd
-case "${HGWT_SHELL:-$(basename "${SHELL:-}")}" in
-  zsh) SHELL_KIND=zsh; SHELLRC="${HGWT_SHELL_RC:-${ZDOTDIR:-$HOME}/.zshrc}" ;;
-  bash) SHELL_KIND=bash; SHELLRC="${HGWT_SHELL_RC:-$HOME/.bashrc}" ;;
-  *) SHELL_KIND=""; SHELLRC="" ;;
-esac
 CONFIG_DIR="${HERDR_PLUGIN_CONFIG_DIR:-$(herdr plugin config-dir "$PLUGIN_ID" 2>/dev/null || true)}"
 [ -n "$CONFIG_DIR" ] || { echo "hgwt-setup: plugin $PLUGIN_ID is not linked/installed in herdr" >&2; exit 1; }
 HOOK="$CONFIG_DIR/hg-hook"
@@ -76,14 +70,11 @@ table_sets() {
     END { exit !found }' "$2"
 }
 
-is_setup() { # also false when the hgrc/shell blocks are from an older version
+is_setup() { # also false when the hgrc block is from an older version
   [ -f "$HERDR_CONFIG" ] && grep -qF "$BEGIN" "$HERDR_CONFIG" &&
-    [ -f "$HGRC" ] && grep -qF "$BEGIN" "$HGRC" && [ -x "$HOOK" ] &&
-    current plan_hgrc "$HGRC" && { [ -z "$SHELLRC" ] || current plan_shellrc "$SHELLRC"; }
+    [ -f "$HGRC" ] && grep -qF "$BEGIN" "$HGRC" && [ -x "$HOOK" ] && hgrc_current
 }
-current() { # planner file: does file already match the plan?
-  local t r; t="$(mktemp)"; "$1" "$t"; cmp -s "$t" "$2"; r=$?; rm -f "$t"; return $r
-}
+hgrc_current() { local t r; t="$(mktemp)"; plan_hgrc "$t"; cmp -s "$t" "$HGRC"; r=$?; rm -f "$t"; return $r; }
 
 # --- herdr config.toml -------------------------------------------------------
 
@@ -157,10 +148,7 @@ write_hook() {
 H="\${HERDR_BIN_PATH:-herdr}"
 root=\$("\$H" plugin list --json --plugin $PLUGIN_ID 2>/dev/null | jq -r '.result.plugins[0].plugin_root // empty')
 [ -n "\$root" ] && [ -x "\$root/bin/hgwt" ] || exit 0
-case "\$1" in
-  --*) HERDR_PLUGIN_CONFIG_DIR="$CONFIG_DIR" exec "\$root/bin/hgwt" refresh "\$@" ;;   # --pane ID DIR
-  *) HERDR_PLUGIN_CONFIG_DIR="$CONFIG_DIR" exec "\$root/bin/hgwt" refresh --cwd "\$1" ;;
-esac
+HERDR_PLUGIN_CONFIG_DIR="$CONFIG_DIR" exec "\$root/bin/hgwt" refresh --cwd "\$1"
 EOF
   chmod +x "$HOOK"
 }
@@ -193,34 +181,6 @@ plan_hgrc() { # writes candidate hgrc to $1
   } >>"$1"
 }
 
-plan_shellrc() { # writes candidate shell rc to $1 (the hook only acts inside herdr panes)
-  touch "$SHELLRC"
-  strip_managed "$SHELLRC" >"$1"
-  { [ -s "$1" ] && echo
-    echo "$BEGIN"
-    if [ "$SHELL_KIND" = zsh ]; then
-      cat <<EOF
-if [ -n "\${HERDR_PANE_ID:-}" ]; then
-  _herdr_hg_chpwd() { ("$HOOK" --pane "\$HERDR_PANE_ID" "\$PWD" >/dev/null 2>&1 &) }
-  autoload -Uz add-zsh-hook && add-zsh-hook chpwd _herdr_hg_chpwd
-fi
-EOF
-    else
-      cat <<EOF
-if [ -n "\${HERDR_PANE_ID:-}" ]; then
-  _herdr_hg_pwd="\$PWD"
-  _herdr_hg_prompt() {
-    [ "\$PWD" = "\$_herdr_hg_pwd" ] && return
-    _herdr_hg_pwd="\$PWD"; ("$HOOK" --pane "\$HERDR_PANE_ID" "\$PWD" >/dev/null 2>&1 &)
-  }
-  PROMPT_COMMAND="_herdr_hg_prompt\${PROMPT_COMMAND:+;\$PROMPT_COMMAND}"
-fi
-EOF
-    fi
-    echo "$END"
-  } >>"$1"
-}
-
 # --- main --------------------------------------------------------------------
 
 show_diff() { diff -u --label "$1 (current)" --label "$1 (new)" "$1" "$2" | sed 's/^/  /' || true; }
@@ -229,7 +189,7 @@ case "${1:-}" in
   --status) is_setup; exit ;;
   --dismiss) mkdir -p "$CONFIG_DIR"; touch "$CONFIG_DIR/.setup-dismissed"; echo "Reminder dismissed."; exit 0 ;;
   --uninstall)
-    for f in "$HERDR_CONFIG" "$HGRC" $SHELLRC; do
+    for f in "$HERDR_CONFIG" "$HGRC"; do
       [ -f "$f" ] || continue
       cp "$f" "$f.herdr-hg.bak"; tmp="$(mktemp)"; strip_managed "$f" >"$tmp"; cat "$tmp" >"$f"; rm -f "$tmp"
       echo "cleaned $f (backup: $f.herdr-hg.bak)"
@@ -245,24 +205,16 @@ esac
 command -v jq >/dev/null || { echo "hgwt-setup: jq is required" >&2; exit 1; }
 command -v hg >/dev/null || echo "warning: hg not on PATH" >&2
 
-cand_cfg="$(mktemp)"; cand_hgrc="$(mktemp)"; cand_rc="$(mktemp)"
-trap 'rm -f "$cand_cfg" "$cand_hgrc" "$cand_rc"' EXIT
+cand_cfg="$(mktemp)"; cand_hgrc="$(mktemp)"; trap 'rm -f "$cand_cfg" "$cand_hgrc"' EXIT
 echo "herdr-hg setup"
 echo
 plan_herdr_config "$cand_cfg"
 plan_hgrc "$cand_hgrc"
-if [ -n "$SHELLRC" ]; then plan_shellrc "$cand_rc"; else rm -f "$cand_rc"; cand_rc=""; fi
-if cmp -s "$cand_cfg" "$HERDR_CONFIG" && cmp -s "$cand_hgrc" "$HGRC" && [ -x "$HOOK" ] && ! shim_needed &&
-   { [ -z "$cand_rc" ] || cmp -s "$cand_rc" "$SHELLRC"; }; then
+if cmp -s "$cand_cfg" "$HERDR_CONFIG" && cmp -s "$cand_hgrc" "$HGRC" && [ -x "$HOOK" ] && ! shim_needed; then
   echo "Already set up, nothing to change."; exit 0
 fi
 echo "Changes to $HERDR_CONFIG:"; show_diff "$HERDR_CONFIG" "$cand_cfg"; echo
 echo "Changes to $HGRC:"; show_diff "$HGRC" "$cand_hgrc"; echo
-if [ -n "$cand_rc" ]; then
-  echo "Changes to $SHELLRC (refreshes the sidebar after cd):"; show_diff "$SHELLRC" "$cand_rc"; echo
-else
-  echo "  note: no cd hook for shell '${SHELL:-?}' (zsh and bash only); the sidebar updates on focus instead"; echo
-fi
 echo "Hook helper: $HOOK"
 echo "Command:     $SHIM (hgwt list/create/open/remove/prune/close-group/info)"; echo
 
@@ -274,12 +226,8 @@ apply_herdr_config "$cand_cfg" || exit 1
 write_hook
 write_shim
 cp "$HGRC" "$HGRC.herdr-hg.bak"; cat "$cand_hgrc" >"$HGRC"
-if [ -n "$cand_rc" ] && ! cmp -s "$cand_rc" "$SHELLRC"; then
-  cp "$SHELLRC" "$SHELLRC.herdr-hg.bak"; cat "$cand_rc" >"$SHELLRC"
-  echo "Open a new shell (or: source $SHELLRC) for the cd hook."
-fi
 rm -f "$CONFIG_DIR/.setup-dismissed"
 "$(dirname "$0")/hgwt" refresh --all >/dev/null 2>&1 || true
-echo "Done. Backups: $HERDR_CONFIG.herdr-hg.bak, $HGRC.herdr-hg.bak${cand_rc:+, $SHELLRC.herdr-hg.bak}"
+echo "Done. Backups: $HERDR_CONFIG.herdr-hg.bak, $HGRC.herdr-hg.bak"
 echo "Keys: $KEY_NEW new · $KEY_OPEN open · $KEY_REMOVE remove · $KEY_CLOSE_GROUP close repo+shares · $KEY_INFO details"
 echo "      herdr's own git worktree key moved to $KEY_GIT_NATIVE"

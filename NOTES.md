@@ -39,9 +39,8 @@ quirks found while building it. User-facing docs are in [README.md](README.md).
   `post-resolve` and `--status` fails on an outdated hgrc block
 - v0.5: sidebar names shortened head…tail to a row-aware budget, `HG_BOOKMARK_STRIP`,
   `HG_BOOKMARK_MAX=0`; share labels shortened too; `hgwt info` / `--fetch` (incoming
-  list) and the popup (enter, `f`, git fallback); zsh `chpwd` hook clears tokens
-  after `cd ~` in a live pane; bash `PROMPT_COMMAND` hook fires only on change;
-  rc uninstall byte-identical; `prefix+shift+i` passes `herdr config check`
+  list) and the popup (enter, `f`, git fallback); `prefix+shift+i` passes
+  `herdr config check`
 - setup: idempotent rerun, byte-for-byte uninstall, existing `[keys]` table,
   customised sidebar rows left alone, key clash → rollback, foreign `hgwt` on
   PATH left alone
@@ -60,8 +59,7 @@ quirks found while building it. User-facing docs are in [README.md](README.md).
      hgrc block, and the New popup with a named branch
    - v0.5: `prefix+shift+i` popup size and paging (`less` when it doesn't fit),
      whether the auto name budget matches what herdr actually shows at your
-     sidebar width and indent (shares are indented further), and `cd` in a
-     pane that isn't the workspace's focused one
+     sidebar width and indent (shares are indented further)
 2. **Publish**: create a GitHub repo, push, add the `herdr-plugin` topic (shows up
    in herdr's marketplace, which re-indexes every 30 min). Then replace `<owner>`
    in README. Not done yet: needs the account/org and public/private decision.
@@ -72,8 +70,8 @@ quirks found while building it. User-facing docs are in [README.md](README.md).
 4. **Upstream feature request to herdr**: let plugins attach worktree provenance
    (e.g. a `parent_workspace_id`/group param on `workspace.create`, or
    `workspace.set_group`). That would give real nesting, `close --group` and
-   `worktree.*` events, and remove the label/ordering workaround. Draft not
-   written yet.
+   `worktree.*` events, and remove the label/ordering workaround. Also ask for a
+   `pane.cwd_changed` event so the hg status can follow `cd`. Draft not written yet.
 5. **Sync / land actions** (discussed, not started): "sync" = pull + rebase the
    share's bookmark onto upstream (or update); "land" = push `-B` then offer prune.
    Needs decisions: rebase vs merge, which remote, what to do with named branches.
@@ -132,10 +130,12 @@ quirks found while building it. User-facing docs are in [README.md](README.md).
   `ui.sidebar_width` and whether `$hg_status` shares the row; herdr auto-scales
   the width from workspace names, so it can be wider than we assume (we then
   just show less than we could), never narrower than configured.
-- **A shell hook for `cd`**: herdr emits nothing when a pane's cwd changes
+- **No shell hook for `cd`**: herdr emits nothing when a pane's cwd changes
   (checked: no `workspace.updated`/`renamed` or `pane.updated`), though it
-  relabels the workspace. The hook passes `$PWD` because herdr may not have seen
-  the new cwd yet; it's only used when that pane is the one the sidebar follows.
+  relabels the workspace, so hg status goes stale after a `cd` until the next
+  refresh. A zsh `chpwd` / bash `PROMPT_COMMAND` hook in the user's rc fixed it
+  (built and tested in v0.5) but was dropped as too invasive. Better fix:
+  ask herdr for a `pane.cwd_changed` event (add to the upstream request).
 - **Setup is fenced**: everything added lives between `herdr-hg` markers (or
   lines tagged `# herdr-hg`), validated with `herdr config check`, with rollback.
 
@@ -196,8 +196,7 @@ herdr workspace list | jq -c '[.result.workspaces[] | "\(.label)=\(.tokens.hg_st
 # popups: pipe answers and fake the context
 printf 'feat-b\n.\n' | HERDR_PLUGIN_CONTEXT_JSON="{\"focused_pane_cwd\":\"$S/demo\"}" bin/hgwt ui new
 # setup in a sandbox
-XDG_CONFIG_HOME=$S/x HGRCPATH_USER=$S/hgrc HERDR_PLUGIN_CONFIG_DIR=$S/pc HGWT_BIN_DIR=$S/bin \
-  HGWT_SHELL=zsh HGWT_SHELL_RC=$S/zshrc bin/hgwt-setup --yes
+XDG_CONFIG_HOME=$S/x HGRCPATH_USER=$S/hgrc HERDR_PLUGIN_CONFIG_DIR=$S/pc HGWT_BIN_DIR=$S/bin bin/hgwt-setup --yes
 ```
 
 Every `hgwt-setup` call in a test needs those variables. One call without them
