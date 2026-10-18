@@ -24,6 +24,9 @@ set -euo pipefail
 PLUGIN_ID="${HERDR_PLUGIN_ID:-mpzarde.hg-worktree}"
 SOURCE="plugin:hg-worktree"
 export HGPLAIN=1
+# hg hooks fired by our own hg calls (resolve -l -> post-resolve) must not
+# re-trigger a refresh, or each refresh spawns another forever
+export HGWT_INTERNAL=1
 
 : "${HERDR_PLUGIN_CONFIG_DIR:=${XDG_CONFIG_HOME:-$HOME/.config}/herdr/plugins/config/$PLUGIN_ID}"
 # shellcheck disable=SC1091

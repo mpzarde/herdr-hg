@@ -145,6 +145,7 @@ write_hook() {
 # Installed by hgwt-setup. Called from ~/.hgrc hooks; resolves the plugin's
 # current install dir each time so 'herdr plugin update' never breaks it.
 [ -n "\$HERDR_ENV\$HERDR_WORKSPACE_ID" ] || exit 0
+[ -z "\$HGWT_INTERNAL" ] || exit 0
 H="\${HERDR_BIN_PATH:-herdr}"
 root=\$("\$H" plugin list --json --plugin $PLUGIN_ID 2>/dev/null | jq -r '.result.plugins[0].plugin_root // empty')
 [ -n "\$root" ] && [ -x "\$root/bin/hgwt" ] || exit 0
