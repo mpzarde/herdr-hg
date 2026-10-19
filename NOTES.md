@@ -80,11 +80,20 @@ quirks found while building it. User-facing docs are in [README.md](README.md).
    the hg-hook and shim follow it; with no new commit it's a no-op. herdr leaves
    the old checkout dir behind on update and the install dir behind on
    uninstall (its own behaviour, not ours).
-4. **Upstream feature request to herdr**: let plugins attach worktree provenance
-   (e.g. a `parent_workspace_id`/group param on `workspace.create`, or
-   `workspace.set_group`). That would give real nesting, `close --group` and
-   `worktree.*` events, and remove the label/ordering workaround. Also ask for a
-   `pane.cwd_changed` event so the hg status can follow `cd`. Draft not written yet.
+4. **Upstream requests to herdr**: done 2026-10-19. herdr takes feature requests
+   as Discussions (Ideas), posted by a human; no PRs from outside contributors.
+   - Worktree grouping for plugin-made checkouts:
+     [#5412](https://github.com/herdrdev/herdr/discussions/5412). Related:
+     [#4727](https://github.com/herdrdev/herdr/discussions/4727) (`workspace
+     set-parent`, upvoted), [#2209](https://github.com/herdrdev/herdr/discussions/2209)
+     (jj workspaces, same plugin limit).
+   - cwd-changed event: commented on and upvoted the existing
+     [#5043](https://github.com/herdrdev/herdr/discussions/5043#discussioncomment-19051983).
+     Checked on 0.9.5: after `cd`, `pane get` shows the new `cwd`/`foreground_cwd`
+     but no `pane.updated`, `workspace.updated`, `workspace.renamed` or
+     `layout.updated` event fires.
+   Watch these; if either lands, drop the matching workaround (labels/regroup,
+   stale status after `cd`).
 5. **Sync / land actions** (discussed, not started): "sync" = pull + rebase the
    share's bookmark onto upstream (or update); "land" = push `-B` then offer prune.
    Needs decisions: rebase vs merge, which remote, what to do with named branches.
@@ -161,7 +170,7 @@ quirks found while building it. User-facing docs are in [README.md](README.md).
   relabels the workspace, so hg status goes stale after a `cd` until the next
   refresh. A zsh `chpwd` / bash `PROMPT_COMMAND` hook in the user's rc fixed it
   (built and tested in v0.5) but was dropped as too invasive. Better fix:
-  ask herdr for a `pane.cwd_changed` event (add to the upstream request).
+  a cwd-changed event from herdr (requested, see #5043 under Next steps).
 - **Setup is fenced**: everything added lives between `herdr-hg` markers (or
   lines tagged `# herdr-hg`), validated with `herdr config check`, with rollback.
 
