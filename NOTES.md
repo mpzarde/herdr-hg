@@ -71,10 +71,12 @@ quirks found while building it. User-facing docs are in [README.md](README.md).
 2. **Publish**: done 2026-10-19 as public github.com/mpzarde/herdr-hg. Still to
    do: add the `herdr-plugin` topic (shows up in herdr's marketplace, which
    re-indexes every 30 min).
-3. **Test the GitHub install path**: `herdr plugin install mpzarde/herdr-hg` on a
-   clean machine/user. Check the startup nudge notification fires, the setup
-   action popup works, and the hook/CLI shims survive `herdr plugin update`
-   (managed install dirs change on update).
+3. **Test the GitHub install path**: done 2026-10-19 (v0.6.0) on the author's
+   machine (unlink, `herdr plugin install mpzarde/herdr-hg`, re-link after).
+   The config dir (config.env, hg-hook) survives unlink/install; exec bits are
+   kept; `hgwt-setup --status`, the `hgwt` shim, the hg-hook, actions, events
+   and startup all resolve and run from the managed checkout; `herdr plugin
+   update` with no new commit keeps the same dir.
 4. **Upstream feature request to herdr**: let plugins attach worktree provenance
    (e.g. a `parent_workspace_id`/group param on `workspace.create`, or
    `workspace.set_group`). That would give real nesting, `close --group` and
