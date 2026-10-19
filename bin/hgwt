@@ -47,7 +47,15 @@ herdr() { "${HERDR_BIN_PATH:-herdr}" "$@"; }
 die() { printf 'hgwt: %s\n' "$*" >&2; exit 1; }
 warn() { printf 'hgwt: %s\n' "$*" >&2; }
 ctx() { [ -n "${HERDR_PLUGIN_CONTEXT_JSON:-}" ] && jq -r "$1 // empty" <<<"$HERDR_PLUGIN_CONTEXT_JSON" || true; }
-with_timeout() { local s="$1"; shift; perl -e 'alarm shift; exec @ARGV or exit 127' "$s" "$@"; }
+# Runs the command in its own process group and kills the whole group on
+# timeout (exit 124): killing only hg would orphan the ssh it spawned.
+with_timeout() {
+  perl -e '
+    my $s = shift; my $pid = fork // exit 127;
+    if (!$pid) { setpgrp(0, 0); exec @ARGV or exit 127 }
+    $SIG{ALRM} = sub { kill "TERM", -$pid; sleep 1; kill "KILL", -$pid; waitpid $pid, 0; exit 124 };
+    alarm $s; waitpid $pid, 0; exit($? & 127 ? 128 + ($? & 127) : $? >> 8)' "$@"
+}
 
 # Raw socket request for methods the CLI doesn't expose (workspace.move).
 sock() {
@@ -514,18 +522,23 @@ remote_stale() {
   [ $(( $(date +%s) - t )) -ge $(( REMOTE_MINUTES * 60 )) ]
 }
 remote_fetch() { # root label -> writes cache "epoch count|-"
-  local r="$1" bm="$2" out n rc f
+  local r="$1" bm="$2" out n rc f lock
   f="$(remote_file "$r" "$bm")"; mkdir -p "$(dirname "$f")"
   if ! hg -R "$r" paths default >/dev/null 2>&1; then echo "$(date +%s) -" >"$f"; return; fi
+  # one check at a time: focus events during a slow (offline) check would each start another
+  lock="$f.lock"
+  find "$lock" -maxdepth 0 -mmin +$(( REMOTE_TIMEOUT / 30 + 2 )) -exec rmdir {} \; 2>/dev/null || true  # left by a killed refresh
+  mkdir "$lock" 2>/dev/null || return 0
   set +e
   out="$(with_timeout "$REMOTE_TIMEOUT" hg -R "$r" incoming -q -T x --config ui.interactive=false -r "$bm" </dev/null 2>/dev/null)"; rc=$?
-  if [ $rc -gt 1 ]; then  # bookmark unknown on remote -> compare named branch instead
+  if [ $rc -gt 1 ] && [ $rc -ne 124 ]; then  # bookmark unknown on remote -> compare named branch instead
     out="$(with_timeout "$REMOTE_TIMEOUT" hg -R "$r" incoming -q -T x --config ui.interactive=false \
            -b "$(hg -R "$r" log -r . -T '{branch}')" </dev/null 2>/dev/null)"; rc=$?
   fi
   set -e
   if [ $rc -le 1 ]; then n=${#out}; else n=-; fi
   echo "$(date +%s) $n" >"$f"
+  rmdir "$lock" 2>/dev/null || true
 }
 
 # --- sidebar tokens ----------------------------------------------------------
@@ -897,10 +910,14 @@ cmd_info() { # dir fetch(0|1)
     if [ "$fetch" = 1 ]; then
       echo "  checking incoming for ${label}…"
       remote_fetch "$r" "$label"
-      x="$(with_timeout "$REMOTE_TIMEOUT" hg -R "$r" incoming -q --config ui.interactive=false -r "$label" \
-            -T '  {node|short} {desc|firstline} · {author|person} · {date|age}\n' </dev/null 2>/dev/null || true)"
-      [ -n "$x" ] || x="$(with_timeout "$REMOTE_TIMEOUT" hg -R "$r" incoming -q --config ui.interactive=false -b "$br" \
-            -T '  {node|short} {desc|firstline} · {author|person} · {date|age}\n' </dev/null 2>/dev/null || true)"
+      x=""
+      # remote unreachable: don't wait out two more timeouts just to list nothing
+      if [ "$(remote_cached "$r" "$label")" != - ]; then
+        x="$(with_timeout "$REMOTE_TIMEOUT" hg -R "$r" incoming -q --config ui.interactive=false -r "$label" \
+              -T '  {node|short} {desc|firstline} · {author|person} · {date|age}\n' </dev/null 2>/dev/null || true)"
+        [ -n "$x" ] || x="$(with_timeout "$REMOTE_TIMEOUT" hg -R "$r" incoming -q --config ui.interactive=false -b "$br" \
+              -T '  {node|short} {desc|firstline} · {author|person} · {date|age}\n' </dev/null 2>/dev/null || true)"
+      fi
     fi
     inc="$(remote_cached "$r" "$label")"; age="$(remote_age "$r" "$label")"
     case "$inc" in
