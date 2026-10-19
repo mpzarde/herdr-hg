@@ -68,15 +68,18 @@ quirks found while building it. User-facing docs are in [README.md](README.md).
 
 1. **Manual test in a real hg repo**: done (daily use inside herdr against real
    hg work repos).
-2. **Publish**: done 2026-10-19 as public github.com/mpzarde/herdr-hg. Still to
-   do: add the `herdr-plugin` topic (shows up in herdr's marketplace, which
-   re-indexes every 30 min).
+2. **Publish**: done 2026-10-19 as public github.com/mpzarde/herdr-hg with the
+   `herdr-plugin` topic, which lists it at herdr.dev/plugins (index refreshes
+   every 30 min and rescans when the default branch moves).
 3. **Test the GitHub install path**: done 2026-10-19 (v0.6.0) on the author's
    machine (unlink, `herdr plugin install mpzarde/herdr-hg`, re-link after).
    The config dir (config.env, hg-hook) survives unlink/install; exec bits are
    kept; `hgwt-setup --status`, the `hgwt` shim, the hg-hook, actions, events
-   and startup all resolve and run from the managed checkout; `herdr plugin
-   update` with no new commit keeps the same dir.
+   and startup all resolve and run from the managed checkout. `herdr plugin
+   update` with a new commit moves the checkout (`…/83566-0` → `…/84964-0`) and
+   the hg-hook and shim follow it; with no new commit it's a no-op. herdr leaves
+   the old checkout dir behind on update and the install dir behind on
+   uninstall (its own behaviour, not ours).
 4. **Upstream feature request to herdr**: let plugins attach worktree provenance
    (e.g. a `parent_workspace_id`/group param on `workspace.create`, or
    `workspace.set_group`). That would give real nesting, `close --group` and
