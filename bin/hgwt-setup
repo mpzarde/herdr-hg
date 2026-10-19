@@ -72,7 +72,7 @@ table_sets() {
 
 is_setup() { # also false when the hgrc block is from an older version
   [ -f "$HERDR_CONFIG" ] && grep -qF "$BEGIN" "$HERDR_CONFIG" &&
-    [ -f "$HGRC" ] && grep -qF "$BEGIN" "$HGRC" && [ -x "$HOOK" ] && hgrc_current
+    [ -f "$HGRC" ] && grep -qF "$BEGIN" "$HGRC" && hook_current && hgrc_current
 }
 hgrc_current() { local t r; t="$(mktemp)"; plan_hgrc "$t"; cmp -s "$t" "$HGRC"; r=$?; rm -f "$t"; return $r; }
 
@@ -138,19 +138,23 @@ apply_herdr_config() {
 
 # --- ~/.hgrc + hook shim -----------------------------------------------------
 
-write_hook() {
-  mkdir -p "$CONFIG_DIR"
-  cat >"$HOOK" <<EOF
+hook_content() {
+  cat <<EOF
 #!/bin/sh
 # Installed by hgwt-setup. Called from ~/.hgrc hooks; resolves the plugin's
 # current install dir each time so 'herdr plugin update' never breaks it.
 [ -n "\$HERDR_ENV\$HERDR_WORKSPACE_ID" ] || exit 0
 [ -z "\$HGWT_INTERNAL" ] || exit 0
 H="\${HERDR_BIN_PATH:-herdr}"
-root=\$("\$H" plugin list --json --plugin $PLUGIN_ID 2>/dev/null | jq -r '.result.plugins[0].plugin_root // empty')
+root=\$(perl -e 'alarm 10; exec @ARGV' "\$H" plugin list --json --plugin $PLUGIN_ID 2>/dev/null | jq -r '.result.plugins[0].plugin_root // empty')
 [ -n "\$root" ] && [ -x "\$root/bin/hgwt" ] || exit 0
 HERDR_PLUGIN_CONFIG_DIR="$CONFIG_DIR" exec "\$root/bin/hgwt" refresh --cwd "\$1"
 EOF
+}
+hook_current() { [ -x "$HOOK" ] && [ "$(hook_content)" = "$(cat "$HOOK")" ]; }
+write_hook() {
+  mkdir -p "$CONFIG_DIR"
+  hook_content >"$HOOK"
   chmod +x "$HOOK"
 }
 
@@ -211,7 +215,7 @@ echo "herdr-hg setup"
 echo
 plan_herdr_config "$cand_cfg"
 plan_hgrc "$cand_hgrc"
-if cmp -s "$cand_cfg" "$HERDR_CONFIG" && cmp -s "$cand_hgrc" "$HGRC" && [ -x "$HOOK" ] && ! shim_needed; then
+if cmp -s "$cand_cfg" "$HERDR_CONFIG" && cmp -s "$cand_hgrc" "$HGRC" && hook_current && ! shim_needed; then
   echo "Already set up, nothing to change."; exit 0
 fi
 echo "Changes to $HERDR_CONFIG:"; show_diff "$HERDR_CONFIG" "$cand_cfg"; echo

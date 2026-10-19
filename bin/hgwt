@@ -43,7 +43,14 @@ REMOTE_TIMEOUT="${HG_REMOTE_TIMEOUT:-20}"
 CACHE="${XDG_CACHE_HOME:-$HOME/.cache}/herdr-hg"
 
 exec 3<&0  # keep the popup terminal for pick(), whose stdin is a pipe
-herdr() { "${HERDR_BIN_PATH:-herdr}" "$@"; }
+HERDR_TIMEOUT="${HGWT_HERDR_TIMEOUT:-15}"
+HG_LOCAL_TIMEOUT="${HGWT_HG_TIMEOUT:-60}"
+HGWT_BG=0  # 1 in unattended runs (events, hg hooks, startup): bound local hg calls too
+# a hung herdr server must not leave one stuck hgwt behind per event
+herdr() { with_timeout "$HERDR_TIMEOUT" "${HERDR_BIN_PATH:-herdr}" "$@"; }
+# hg waits up to ui.timeout (600s) on a repo lock; popups may legitimately run
+# long updates/shares, so only background runs get a limit
+hg() { if [ "$HGWT_BG" = 1 ]; then with_timeout "$HG_LOCAL_TIMEOUT" hg "$@"; else command hg "$@"; fi; }
 die() { printf 'hgwt: %s\n' "$*" >&2; exit 1; }
 warn() { printf 'hgwt: %s\n' "$*" >&2; }
 ctx() { [ -n "${HERDR_PLUGIN_CONTEXT_JSON:-}" ] && jq -r "$1 // empty" <<<"$HERDR_PLUGIN_CONTEXT_JSON" || true; }
@@ -590,9 +597,33 @@ blocked_status() {
   elif [ "$n" -gt 0 ]; then echo "!$n"; fi
 }
 
+# One refresh per workspace at a time. Requests that arrive meanwhile (a rebase
+# fires txnclose per commit, agents settle in bursts) fold into a single rerun:
+# they leave their mode in $lock/again, and the owner loops until rmdir succeeds
+# (the dir is empty only when nobody asked during its last pass).
+REFRESH_LOCK=""
 refresh_ws() { # ws [cwd] [remote mode: auto|force|cache]
-  local ws="$1" cwd="${2:-}" mode="${3:-cache}" r bm draft dirty inc status src cur want
+  local ws="$1" cwd="${2:-}" mode="${3:-cache}" lock tries=0
   [ -n "$ws" ] || return 0
+  mkdir -p "$CACHE/lock"; lock="$CACHE/lock/refresh-$(ck "$ws")"
+  find "$lock" -maxdepth 0 -mmin +$(( REMOTE_TIMEOUT / 30 + 2 )) -exec rm -rf {} \; 2>/dev/null || true  # owner was killed
+  until mkdir "$lock" 2>/dev/null; do
+    { echo "$mode" >>"$lock/again"; } 2>/dev/null && return 0   # fails only if the owner just finished
+    tries=$((tries + 1)); [ $tries -lt 3 ] || return 0
+  done
+  REFRESH_LOCK="$lock"; trap '[ -z "$REFRESH_LOCK" ] || rm -rf "$REFRESH_LOCK"' EXIT
+  while :; do
+    refresh_ws_now "$ws" "$cwd" "$mode" || true
+    rmdir "$lock" 2>/dev/null && break
+    if grep -q force "$lock/again" 2>/dev/null; then mode=force
+    elif grep -q auto "$lock/again" 2>/dev/null; then mode=auto; else mode=cache; fi
+    rm -f "$lock/again"; cwd=""
+  done
+  REFRESH_LOCK=""
+}
+
+refresh_ws_now() { # ws [cwd] [remote mode]
+  local ws="$1" cwd="${2:-}" mode="${3:-cache}" r bm draft dirty inc status src cur want
   [ -n "$cwd" ] || cwd="$(ws_cwd "$ws")"
   if [ -z "$cwd" ] || [ "$(vcs_of "$cwd")" != hg ]; then
     herdr workspace report-metadata "$ws" --source "$SOURCE" \
@@ -1060,9 +1091,10 @@ case "${1:-}" in
       setup) "$(dirname "$0")/hgwt-setup" <&3 || true; pause ;;
       *) die "usage: hgwt ui new|open|remove|prune|close-group|info|setup" ;;
     esac ;;
-  refresh) shift; cmd_refresh "$@" ;;
+  refresh) shift; HGWT_BG=1; cmd_refresh "$@" ;;
   setup) shift; exec "$(dirname "$0")/hgwt-setup" "$@" ;;
   startup) # herdr startup hook: restore sidebar tokens + grouping, nudge once if not set up
+    HGWT_BG=1
     find "$CACHE/remote" -maxdepth 1 -type f -delete 2>/dev/null || true  # pre-0.3 flat cache
     cmd_refresh --all auto || true
     relabel_all || true
