@@ -3,7 +3,7 @@
 Working notes for herdr-hg: status, next steps, design decisions and the herdr
 quirks found while building it. User-facing docs are in [README.md](README.md).
 
-## Status (2026-10-19, v0.5.0, herdr 0.9.5, hg 7.0.2)
+## Status (2026-10-19, v0.6.0, herdr 0.9.5, hg 7.0.2)
 
 - Linked locally: `herdr plugin link ~/projects/herdr-hg`
 - Setup applied on the author's machine (`hgwt setup`). The plugin's `config.env`
@@ -45,7 +45,7 @@ quirks found while building it. User-facing docs are in [README.md](README.md).
 - setup: idempotent rerun, byte-for-byte uninstall, existing `[keys]` table,
   customised sidebar rows left alone, key clash → rollback, foreign `hgwt` on
   PATH left alone
-- runaway guards (2026-10-19): incoming timeout against the real ssh remote while
+- v0.6 runaway guards: incoming timeout against the real ssh remote while
   offline leaves no ssh behind; 30 concurrent hook refreshes → 2 passes; a hung
   `herdr` or `hg status` ends the refresh at the timeout; setup flags an outdated
   hg-hook
