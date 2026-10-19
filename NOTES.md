@@ -3,13 +3,14 @@
 Working notes for herdr-hg: status, next steps, design decisions and the herdr
 quirks found while building it. User-facing docs are in [README.md](README.md).
 
-## Status (2026-10-16, v0.5.0, herdr 0.9.5, hg 7.0.2)
+## Status (2026-10-19, v0.5.0, herdr 0.9.5, hg 7.0.2)
 
 - Linked locally: `herdr plugin link ~/projects/herdr-hg`
 - Setup applied on the author's machine (`hgwt setup`). The plugin's `config.env`
   sets `HG_WORKTREES_LAYOUT=sibling`.
-- Everything below "Tested" was scripted against throwaway repos. The popups
-  have **not** been driven by hand inside herdr yet.
+- In daily use inside herdr against real hg work repos (ssh remote behind a
+  VPN), popups included. That use is what surfaced the incidents below.
+- The list below was scripted against throwaway repos on top of that.
 
 ### Tested (scripted)
 
@@ -44,16 +45,34 @@ quirks found while building it. User-facing docs are in [README.md](README.md).
 - setup: idempotent rerun, byte-for-byte uninstall, existing `[keys]` table,
   customised sidebar rows left alone, key clash → rollback, foreign `hgwt` on
   PATH left alone
+- runaway guards (2026-10-19): incoming timeout against the real ssh remote while
+  offline leaves no ssh behind; 30 concurrent hook refreshes → 2 passes; a hung
+  `herdr` or `hg status` ends the refresh at the timeout; setup flags an outdated
+  hg-hook
+
+### Incidents
+
+- **2026-10-17, refresh loop (7f55d86)**: `hgwt refresh` runs `hg resolve -l`,
+  which fires `post-resolve`, whose hook spawns another detached refresh, forever.
+  Hundreds of refreshes piled up and took down the machine (M3 Ultra). Fix: hgwt
+  exports `HGWT_INTERNAL=1` and the hg-hook exits when it's set.
+- **2026-10-19, orphaned ssh (d847eac)**: with the VPN down, `hg incoming` hung
+  on ssh (no `ConnectTimeout`). The perl `alarm; exec` timeout killed hg only, so
+  each stale check left two `ssh … hg serve --stdio` reparented to init. Fix: run
+  the command in its own process group and kill the group; no branch retry after
+  a timeout; one remote check per checkout at a time.
+- Follow-up audit (915ed52): every unattended call bounded, refresh bursts
+  coalesced (see "Unattended runs" under design decisions).
 
 ## Next steps
 
-1. **Manual test in a real hg repo**: `ctrl+b G` / `O` / `Y` / `C` popups and the
-   Clean up action, sizes, prompts, focus behaviour. In particular:
+1. **Manual test in a real hg repo**: covered by daily use. Edge cases not
+   specifically confirmed by hand:
    - removing the share you're in from its own popup (the workspace close may
      kill the popup; all hg work is done before that, but its messages may not
      be visible)
-   - `↓` against a real (ssh/https) remote, including the timeout and no-prompt
-     behaviour
+   - `↓` against a real remote when reachable (offline timeout is verified),
+     and the no-prompt behaviour when ssh needs a password
    - v0.4: `.hg/hgwt-setup` running in the new pane (shell prompt ready in time?),
      `!` status during a real rebase/merge, the setup reminder on an outdated
      hgrc block, and the New popup with a named branch
@@ -121,6 +140,15 @@ quirks found while building it. User-facing docs are in [README.md](README.md).
   generated labels are rewritten, so a manual rename opts a workspace out.
 - **Regroup only on create/open/source open/close/startup**, not on every focus,
   so dragging a share elsewhere isn't immediately undone.
+- **Unattended runs are bounded and coalesced**: events, hg hooks and startup
+  run with nobody watching, so nothing they start may hang or multiply. hg's own
+  hooks are ignored while `HGWT_INTERNAL` is set; `herdr` calls time out
+  (`HGWT_HERDR_TIMEOUT`, 15s) everywhere; local hg calls time out
+  (`HGWT_HG_TIMEOUT`, 60s) in refresh/startup only, since popups can run long
+  shares/updates; `with_timeout` kills the whole process group. Each workspace
+  refreshes under a lock dir; requests during a pass write `again` and the owner
+  reruns once (loops until `rmdir` of the lock succeeds). Stale locks (killed
+  owner) expire after a couple of minutes.
 - **Remote checks never block UI**: popups/CLI use cache only; network happens in
   event hooks (async from herdr's side) and backgrounded hg hooks.
 - **Git is delegated, not reimplemented**: the plugin's keys call
@@ -161,7 +189,12 @@ quirks found while building it. User-facing docs are in [README.md](README.md).
   every command. Without it, `hg bookmarks` in the share shows "no bookmarks set".
   Fixed per share via `.hg/hgrc`.
 - hg `incoming` exits 1 for "nothing incoming" (not an error). Anything above 1
-  means error/unknown bookmark, so fall back to `-b <branch>`.
+  means error/unknown bookmark, so fall back to `-b <branch>`, except after a
+  timeout (124): the remote is unreachable and a retry just waits again.
+- hg runs ssh as a child. Killing hg (alarm, timeout) leaves that ssh running,
+  reparented to init, for as long as it hangs.
+- `hg resolve -l` fires `post-resolve` even though it only lists. Any hg call
+  from code an hg hook started can re-trigger that hook.
 - hg 7: `strip` is core as `hg debugstrip` (the extension is deprecated). Run it
   from the source repo, not the share being removed, or the backup bundle lands
   in the share's `.hg` and gets deleted with it.
@@ -180,7 +213,9 @@ quirks found while building it. User-facing docs are in [README.md](README.md).
 - Don't redirect `less`'s stdin to the terminal (`<&3`); it reads keys from
   `/dev/tty` and the text from the pipe.
 - macOS: bash 3.2 (`source <(…)` doesn't work, no `mapfile`/assoc arrays), no
-  `timeout` (use `perl -e 'alarm …; exec …'`), BSD `sed -i ''`.
+  `timeout` (use `with_timeout`, a perl fork + `setpgrp` that kills the process
+  group; plain `perl -e 'alarm …; exec …'` only kills the top process, which is
+  fine only when it has no children, as in the hg-hook), BSD `sed -i ''`.
 
 ## Testing
 
