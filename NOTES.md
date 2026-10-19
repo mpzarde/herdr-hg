@@ -60,10 +60,10 @@ quirks found while building it. User-facing docs are in [README.md](README.md).
    - v0.5: `prefix+shift+i` popup size and paging (`less` when it doesn't fit),
      whether the auto name budget matches what herdr actually shows at your
      sidebar width and indent (shares are indented further)
-2. **Publish**: create a GitHub repo, push, add the `herdr-plugin` topic (shows up
-   in herdr's marketplace, which re-indexes every 30 min). Then replace `<owner>`
-   in README. Not done yet: needs the account/org and public/private decision.
-3. **Test the GitHub install path**: `herdr plugin install <owner>/herdr-hg` on a
+2. **Publish**: done 2026-10-19 as public github.com/mpzarde/herdr-hg. Still to
+   do: add the `herdr-plugin` topic (shows up in herdr's marketplace, which
+   re-indexes every 30 min).
+3. **Test the GitHub install path**: `herdr plugin install mpzarde/herdr-hg` on a
    clean machine/user. Check the startup nudge notification fires, the setup
    action popup works, and the hook/CLI shims survive `herdr plugin update`
    (managed install dirs change on update).

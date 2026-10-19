@@ -165,10 +165,10 @@ In a git repo it shows `git status -sb`, the last commit and the remotes.
 
 Needs `herdr` ≥ 0.9, `hg`, `jq`, `nc` and `perl` (macOS ships the last three).
 
-**From GitHub** (once published):
+**From GitHub:**
 
 ```sh
-herdr plugin install <owner>/herdr-hg
+herdr plugin install mpzarde/herdr-hg
 ```
 
 The first time herdr starts after that, a notification points you at the
