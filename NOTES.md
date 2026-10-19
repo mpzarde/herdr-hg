@@ -66,16 +66,8 @@ quirks found while building it. User-facing docs are in [README.md](README.md).
 
 ## Next steps
 
-1. **Manual test in a real hg repo**: covered by daily use. Edge cases not
-   specifically confirmed by hand:
-   - `↓` against a real remote when reachable (offline timeout is verified),
-     and the no-prompt behaviour when ssh needs a password
-   - v0.4: `.hg/hgwt-setup` running in the new pane (shell prompt ready in time?),
-     `!` status during a real rebase/merge, the setup reminder on an outdated
-     hgrc block, and the New popup with a named branch
-   - v0.5: `prefix+shift+i` popup size and paging (`less` when it doesn't fit),
-     whether the auto name budget matches what herdr actually shows at your
-     sidebar width and indent (shares are indented further)
+1. **Manual test in a real hg repo**: done (daily use inside herdr against real
+   hg work repos).
 2. **Publish**: done 2026-10-19 as public github.com/mpzarde/herdr-hg. Still to
    do: add the `herdr-plugin` topic (shows up in herdr's marketplace, which
    re-indexes every 30 min).
