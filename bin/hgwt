@@ -52,7 +52,8 @@ herdr() { with_timeout "$HERDR_TIMEOUT" "${HERDR_BIN_PATH:-herdr}" "$@"; }
 # long updates/shares, so only background runs get a limit
 hg() { if [ "$HGWT_BG" = 1 ]; then with_timeout "$HG_LOCAL_TIMEOUT" hg "$@"; else command hg "$@"; fi; }
 die() { printf 'hgwt: %s\n' "$*" >&2; exit 1; }
-warn() { printf 'hgwt: %s\n' "$*" >&2; }
+WARN_LOG=""  # this run's messages, for close_ws
+warn() { printf 'hgwt: %s\n' "$*" >&2; WARN_LOG="${WARN_LOG:+$WARN_LOG$'\n'}$*"; }
 ctx() { [ -n "${HERDR_PLUGIN_CONTEXT_JSON:-}" ] && jq -r "$1 // empty" <<<"$HERDR_PLUGIN_CONTEXT_JSON" || true; }
 # Runs the command in its own process group and kills the whole group on
 # timeout (exit 124): killing only hg would orphan the ssh it spawned.
@@ -437,7 +438,17 @@ core_remove() { # path src force(0|1) strip(0|1); returns 3 when unsaved work an
   rm -rf -- "$path" "$(remote_dir "$path")"
   unrecord_share "$src" "$path"
   if [ "$(dirname "$path")" = "$WT_ROOT/$(basename "$src")" ]; then rmdir "$(dirname "$path")" 2>/dev/null || true; fi
-  [ -z "$ws" ] || herdr workspace close "$ws" >/dev/null || true
+  [ -z "$ws" ] || close_ws "$ws"
+}
+
+# Closing the workspace this runs in (popup or pane) kills us and our output,
+# so hand what we printed to a notification first.
+close_ws() { # ws
+  if [ "$1" = "$(current_ws)" ] && [ -n "$WARN_LOG" ]; then
+    herdr notification show "hg worktrees" --body "$WARN_LOG" >/dev/null 2>&1 || true
+    WARN_LOG=""
+  fi
+  herdr workspace close "$1" >/dev/null || true
 }
 
 # Shares safe to remove without asking: no unsaved files, nothing unlanded.
@@ -487,16 +498,18 @@ core_prune() { # src include_open(0|1) dry_run(0|1)
   [ $n -gt 0 ] || warn "nothing to clean up"
 }
 
-core_close_group() { # src -> closes shares then source workspace
-  local ws role p members
-  members="$(group_members "$1")"
+core_close_group() { # src -> closes shares, then source, then the one we run in
+  local ws role p members cur
+  members="$(group_members "$1")"; cur="$(current_ws)"
   [ -n "$members" ] || { warn "no open workspaces for $1"; return 0; }
   while IFS=$'\t' read -r ws role p; do
-    if [ "$role" = share ]; then herdr workspace close "$ws" >/dev/null || true; fi
+    if [ "$role" = share ] && [ "$ws" != "$cur" ]; then close_ws "$ws"; fi
   done <<<"$members"
   while IFS=$'\t' read -r ws role p; do
-    if [ "$role" = source ]; then herdr workspace close "$ws" >/dev/null || true; fi
+    if [ "$role" = source ] && [ "$ws" != "$cur" ]; then close_ws "$ws"; fi
   done <<<"$members"
+  # last: closing it ends this process
+  if awk -F'\t' -v w="$cur" '$1 == w { f = 1 } END { exit !f }' <<<"$members"; then close_ws "$cur"; fi
 }
 
 # Re-label/regroup every open share workspace (after a source opened/closed).

@@ -68,9 +68,6 @@ quirks found while building it. User-facing docs are in [README.md](README.md).
 
 1. **Manual test in a real hg repo**: covered by daily use. Edge cases not
    specifically confirmed by hand:
-   - removing the share you're in from its own popup (the workspace close may
-     kill the popup; all hg work is done before that, but its messages may not
-     be visible)
    - `↓` against a real remote when reachable (offline timeout is verified),
      and the no-prompt behaviour when ssh needs a password
    - v0.4: `.hg/hgwt-setup` running in the new pane (shell prompt ready in time?),
@@ -149,6 +146,10 @@ quirks found while building it. User-facing docs are in [README.md](README.md).
   refreshes under a lock dir; requests during a pass write `again` and the owner
   reruns once (loops until `rmdir` of the lock succeeds). Stale locks (killed
   owner) expire after a couple of minutes.
+- **Closing our own workspace goes last, with a notification**: closing the
+  workspace a popup or CLI runs in kills it and its output. So remove and
+  close-group finish all other work first, close the current workspace last,
+  and hand the run's messages (`warn` collects them) to a herdr notification.
 - **Remote checks never block UI**: popups/CLI use cache only; network happens in
   event hooks (async from herdr's side) and backgrounded hg hooks.
 - **Git is delegated, not reimplemented**: the plugin's keys call
