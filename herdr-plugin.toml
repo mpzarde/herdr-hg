@@ -1,9 +1,9 @@
 id = "mpzarde.hg-worktree"
 name = "hg worktrees"
-version = "0.6.1"
+version = "0.7.0"
 min_herdr_version = "0.9.0"
 description = "Mercurial (hg share) worktree workspaces with git fallthrough, plus hg sidebar status"
-platforms = ["linux", "macos"]
+platforms = ["linux", "macos", "windows"]
 
 # --- Actions (bind these in config.toml, see README) ------------------------
 # Each action opens a popup because creating/opening/removing needs input.
@@ -13,48 +13,112 @@ id = "new"
 title = "New worktree (hg share or git worktree)"
 contexts = ["workspace"]
 command = ["bin/hgwt", "action", "new"]
+platforms = ["linux", "macos"]
+
+[[actions]]
+id = "new-win"
+title = "New worktree (hg share or git worktree)"
+contexts = ["workspace"]
+command = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "bin/hgwt.ps1", "action", "new"]
+platforms = ["windows"]
 
 [[actions]]
 id = "open"
 title = "Open worktree (hg share or git worktree)"
 contexts = ["workspace"]
 command = ["bin/hgwt", "action", "open"]
+platforms = ["linux", "macos"]
+
+[[actions]]
+id = "open-win"
+title = "Open worktree (hg share or git worktree)"
+contexts = ["workspace"]
+command = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "bin/hgwt.ps1", "action", "open"]
+platforms = ["windows"]
 
 [[actions]]
 id = "remove"
 title = "Remove worktree (hg share or git worktree)"
 contexts = ["workspace"]
 command = ["bin/hgwt", "action", "remove"]
+platforms = ["linux", "macos"]
+
+[[actions]]
+id = "remove-win"
+title = "Remove worktree (hg share or git worktree)"
+contexts = ["workspace"]
+command = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "bin/hgwt.ps1", "action", "remove"]
+platforms = ["windows"]
 
 [[actions]]
 id = "prune"
 title = "Clean up hg shares and bookmarks whose work has landed"
 contexts = ["workspace"]
 command = ["bin/hgwt", "action", "prune"]
+platforms = ["linux", "macos"]
+
+[[actions]]
+id = "prune-win"
+title = "Clean up hg shares and bookmarks whose work has landed"
+contexts = ["workspace"]
+command = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "bin/hgwt.ps1", "action", "prune"]
+platforms = ["windows"]
 
 [[actions]]
 id = "close-group"
 title = "Close hg repo workspace and all its shares"
 contexts = ["workspace"]
 command = ["bin/hgwt", "action", "close-group"]
+platforms = ["linux", "macos"]
+
+[[actions]]
+id = "close-group-win"
+title = "Close hg repo workspace and all its shares"
+contexts = ["workspace"]
+command = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "bin/hgwt.ps1", "action", "close-group"]
+platforms = ["windows"]
 
 [[actions]]
 id = "info"
 title = "Show hg details (bookmark, parent, remote, unpushed, shares)"
 contexts = ["workspace"]
 command = ["bin/hgwt", "action", "info"]
+platforms = ["linux", "macos"]
+
+[[actions]]
+id = "info-win"
+title = "Show hg details (bookmark, parent, remote, unpushed, shares)"
+contexts = ["workspace"]
+command = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "bin/hgwt.ps1", "action", "info"]
+platforms = ["windows"]
 
 [[actions]]
 id = "setup"
 title = "Set up hg worktrees (keys, sidebar, hg hooks)"
 contexts = ["workspace"]
 command = ["bin/hgwt", "action", "setup"]
+platforms = ["linux", "macos"]
+
+[[actions]]
+id = "setup-win"
+title = "Set up hg worktrees (keys, sidebar, hg hooks)"
+contexts = ["workspace"]
+command = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "bin/hgwt.ps1", "action", "setup"]
+platforms = ["windows"]
 
 [[actions]]
 id = "refresh"
 title = "Refresh hg sidebar status"
 contexts = ["workspace"]
 command = ["bin/hgwt", "refresh"]
+platforms = ["linux", "macos"]
+
+[[actions]]
+id = "refresh-win"
+title = "Refresh hg sidebar status"
+contexts = ["workspace"]
+command = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "bin/hgwt.ps1", "refresh"]
+platforms = ["windows"]
 
 # --- Popups ------------------------------------------------------------------
 
@@ -65,6 +129,16 @@ placement = "popup"
 width = 72
 height = 14
 command = ["bin/hgwt", "ui", "new"]
+platforms = ["linux", "macos"]
+
+[[panes]]
+id = "new-win"
+title = "New worktree"
+placement = "popup"
+width = 72
+height = 14
+command = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "bin/hgwt.ps1", "ui", "new"]
+platforms = ["windows"]
 
 [[panes]]
 id = "open"
@@ -73,6 +147,16 @@ placement = "popup"
 width = "70%"
 height = 20
 command = ["bin/hgwt", "ui", "open"]
+platforms = ["linux", "macos"]
+
+[[panes]]
+id = "open-win"
+title = "Open worktree"
+placement = "popup"
+width = "70%"
+height = 20
+command = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "bin/hgwt.ps1", "ui", "open"]
+platforms = ["windows"]
 
 [[panes]]
 id = "remove"
@@ -81,6 +165,16 @@ placement = "popup"
 width = "70%"
 height = 20
 command = ["bin/hgwt", "ui", "remove"]
+platforms = ["linux", "macos"]
+
+[[panes]]
+id = "remove-win"
+title = "Remove worktree"
+placement = "popup"
+width = "70%"
+height = 20
+command = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "bin/hgwt.ps1", "ui", "remove"]
+platforms = ["windows"]
 
 [[panes]]
 id = "prune"
@@ -89,6 +183,16 @@ placement = "popup"
 width = "70%"
 height = 20
 command = ["bin/hgwt", "ui", "prune"]
+platforms = ["linux", "macos"]
+
+[[panes]]
+id = "prune-win"
+title = "Clean up shares"
+placement = "popup"
+width = "70%"
+height = 20
+command = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "bin/hgwt.ps1", "ui", "prune"]
+platforms = ["windows"]
 
 [[panes]]
 id = "close-group"
@@ -97,6 +201,16 @@ placement = "popup"
 width = "70%"
 height = 22
 command = ["bin/hgwt", "ui", "close-group"]
+platforms = ["linux", "macos"]
+
+[[panes]]
+id = "close-group-win"
+title = "Close repo + shares"
+placement = "popup"
+width = "70%"
+height = 22
+command = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "bin/hgwt.ps1", "ui", "close-group"]
+platforms = ["windows"]
 
 [[panes]]
 id = "info"
@@ -105,6 +219,16 @@ placement = "popup"
 width = "80%"
 height = "80%"
 command = ["bin/hgwt", "ui", "info"]
+platforms = ["linux", "macos"]
+
+[[panes]]
+id = "info-win"
+title = "hg details"
+placement = "popup"
+width = "80%"
+height = "80%"
+command = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "bin/hgwt.ps1", "ui", "info"]
+platforms = ["windows"]
 
 [[panes]]
 id = "setup"
@@ -113,25 +237,64 @@ placement = "popup"
 width = "90%"
 height = "90%"
 command = ["bin/hgwt", "ui", "setup"]
+platforms = ["linux", "macos"]
+
+[[panes]]
+id = "setup-win"
+title = "Set up hg worktrees"
+placement = "popup"
+width = "90%"
+height = "90%"
+command = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "bin/hgwt.ps1", "ui", "setup"]
+platforms = ["windows"]
 
 # --- Keeping $hg_bookmark / $hg_status current -------------------------------
 
 [[startup]]
 command = ["bin/hgwt", "startup"]
+platforms = ["linux", "macos"]
+
+[[startup]]
+command = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "bin/hgwt.ps1", "startup"]
+platforms = ["windows"]
 
 [[events]]
 on = "workspace.focused"
 command = ["bin/hgwt", "refresh", "--event"]
+platforms = ["linux", "macos"]
+
+[[events]]
+on = "workspace.focused"
+command = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "bin/hgwt.ps1", "refresh", "--event"]
+platforms = ["windows"]
 
 [[events]]
 on = "workspace.created"
 command = ["bin/hgwt", "refresh", "--event"]
+platforms = ["linux", "macos"]
+
+[[events]]
+on = "workspace.created"
+command = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "bin/hgwt.ps1", "refresh", "--event"]
+platforms = ["windows"]
 
 [[events]]
 on = "workspace.closed"
 command = ["bin/hgwt", "refresh", "--event"]
+platforms = ["linux", "macos"]
+
+[[events]]
+on = "workspace.closed"
+command = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "bin/hgwt.ps1", "refresh", "--event"]
+platforms = ["windows"]
 
 # agents edit files without running hg; refresh *N when one settles
 [[events]]
 on = "pane.agent_status_changed"
 command = ["bin/hgwt", "refresh", "--event"]
+platforms = ["linux", "macos"]
+
+[[events]]
+on = "pane.agent_status_changed"
+command = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "bin/hgwt.ps1", "refresh", "--event"]
+platforms = ["windows"]

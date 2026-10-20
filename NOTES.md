@@ -1,7 +1,7 @@
 # Development notes
 
 Working notes for herdr-hg: status, next steps, design decisions and the herdr
-quirks found while building it. User-facing docs are in [README.md](README.md).
+quirks found while building it. User-facing docs: [README.md](README.md) and [docs/REFERENCE.md](docs/REFERENCE.md).
 
 ## Status (2026-10-19, v0.6.0, herdr 0.9.5, hg 7.0.2)
 
@@ -103,7 +103,7 @@ quirks found while building it. User-facing docs are in [README.md](README.md).
    - topics (evolve) as an alternative to bookmarks; unstable-commit count in status
    - shelve count in status
    - a test script in-repo (tests so far were ad-hoc shell; see "Testing" below)
-   - Windows support (herdr supports it; this plugin is bash-only)
+   - Windows: PowerShell port written (v0.7.0, beta), **untested on real Windows**. See "Windows port" below.
 
 ## Design decisions
 
@@ -248,3 +248,39 @@ config; that happened once during v0.4 testing and was restored from the
 
 Clean up the test workspaces afterwards (`hgwt close-group` from the test repo).
 `HGWT_FOCUS=0` keeps tests from stealing focus from your current pane.
+
+## Windows port (v0.7.0)
+
+Why a port rather than a shim: bash, jq, nc and perl are all missing on a stock
+Windows, and `nc -U` / perl `setpgrp` have no direct equivalent there.
+
+- `bin/hgwt.ps1` and `bin/hgwt-setup.ps1` mirror the bash scripts function for
+  function. Written for Windows PowerShell 5.1 *and* PowerShell 7 (no `??`, `?.`,
+  `&&`, `ArgumentList`, 3-arg `Join-Path`, non-ASCII source; BOM-less files are
+  read as ANSI by 5.1, so glyphs are `[char]` codes).
+- herdr rejects duplicate action/pane ids even with disjoint `platforms`
+  (`duplicate_plugin_action_id`, checked on 0.9.x), so every entry has a `-win`
+  twin. `hgwt action` appends `-win` on Windows; setup binds keys to `-win` ids.
+- Commands are `powershell -NoProfile -ExecutionPolicy Bypass -File bin/hgwt.ps1 ...`
+  because the default client policy (Restricted) blocks .ps1 files.
+- Child processes go through `Exec` (System.Diagnostics.Process, stdin closed,
+  async stdout/stderr). Timeouts kill the tree: `taskkill /T /F` on Windows,
+  `Kill($true)` elsewhere. Exit 124 on timeout, as before.
+- `Sock` uses a named pipe on Windows, a unix socket elsewhere (the latter is
+  tested against a python listener; the message matches the bash version).
+- hg hook on Windows: `start "" /B powershell ... hg-hook.ps1 >nul 2>&1` so hg
+  doesn't wait. The hook runs in the repo root, so it uses its own cwd instead of `$PWD`.
+- Aliases bite: `Dir`, `H`, `Cli` as function names are shadowed by built-in
+  aliases (`dir`, `h`, `cli`); aliases beat functions. Also an `if` expression
+  unrolls a one-element array to a scalar (`[string[]]$x = @(if ...)`).
+
+Tested on macOS with PowerShell 7.6 against real hg 7.0 repos, with `herdr` stubbed
+by a script that logs its calls: list/create/open/remove (clean, dirty, unlanded,
+`--strip`), prune, info (output diffed against bash: identical), all six popups
+via piped stdin, event/hook refresh, timeout tree-kill, unix socket request, and
+setup apply/idempotent/status/uninstall (config.toml diffed against bash: identical).
+
+**Not tested (needs a Windows box):** named-pipe path format of
+`HERDR_SOCKET_PATH`, `start /B` hook, `taskkill`, `.cmd` shim, PowerShell 5.1
+itself, CRLF config files, Windows path/case handling (`NormP`, `Real-Path`),
+`hg share` behaviour on Windows, `less`/ANSI in the ConPTY popup.
