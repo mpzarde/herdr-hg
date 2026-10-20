@@ -9,6 +9,10 @@ does two things:
   files for every hg repo open in herdr, whether or not you use shares, plus a
   details popup for everything the sidebar can't fit.
 
+> **Platform support: \*nix only (macOS and Linux).** The plugin is written in bash
+> and does not run on Windows. Installing it there fails with
+> `platform_unsupported`.
+
 herdr itself still only knows about git. This plugin checks which kind of repo
 you're in, so the same keys work in both: hg repos get `hg share`, git repos are
 handed to herdr's built-in `herdr worktree`.
@@ -163,6 +167,8 @@ In a git repo it shows `git status -sb`, the last commit and the remotes.
 
 ## Install
 
+**\*nix only (macOS and Linux); Windows is not supported** (see Limitations).
+
 Needs `herdr` ≥ 0.9, `hg`, `jq`, `nc` and `perl` (macOS ships the last three).
 
 **From GitHub:**
@@ -277,7 +283,8 @@ HGWT_KEY_GIT_NATIVE=prefix+alt+g
   need a password prompt simply show no `↓`.
 - The setup script is typed into the new workspace's shell, so it needs a shell
   prompt there (the default).
-- macOS and Linux only (bash scripts).
+- \*nix only: macOS and Linux (bash scripts). Windows is not supported and fails
+  with `platform_unsupported`; a port is listed in NOTES.md.
 - TortoiseHg's settings dialog rewrites `~/.hgrc`. If the hooks disappear after
   you use it, run `hgwt setup` again.
 

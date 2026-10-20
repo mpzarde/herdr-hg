@@ -1,6 +1,6 @@
 id = "mpzarde.hg-worktree"
 name = "hg worktrees"
-version = "0.6.0"
+version = "0.6.1"
 min_herdr_version = "0.9.0"
 description = "Mercurial (hg share) worktree workspaces with git fallthrough, plus hg sidebar status"
 platforms = ["linux", "macos"]
